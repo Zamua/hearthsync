@@ -124,6 +124,33 @@ A kind with `home(r)` marks room keys an earlier build wrote (one save for the w
 several): a record read there merges in at its own key, the old key is never written, and it is read again only when
 it changed since it was last seen, so a record deleted since does not come back from it.
 
+### Per-device state in the meta
+
+An app may keep small state of its own on the device, beside its records and never synced: items seen, the last one
+used. `Model.meta` (`AppMeta<A>`) maps it to fields of the store's meta key, so it is written in the same write as the
+account and the clock, after any records the edit changed:
+
+```ts
+interface Here { seen: GSet; last: string | null }
+
+const model: Model<List, Here> = {
+  /* ... */
+  meta: {
+    read: meta => ({ seen: gsetFrom(meta.seen), last: typeof meta.last === 'string' ? meta.last : null }),
+    write: h => ({ seen: h.seen, last: h.last }),
+    merge: (mine, theirs) => ({ seen: gsetMerge(mine.seen, theirs.seen), last: theirs.last ?? mine.last }),
+  },
+};
+
+local.edit(s => ({ ...s, app: { ...s.app, last: 'list/groceries' } }));
+```
+
+The state lives on `store.app` (undefined for a model without the hook). `read` gets the meta as storage holds it
+(`{}` when there is none) and repairs it; the library's own fields win over any of the app's named the same. When
+another tab has written the meta since this one last did, `merge(mine, theirs)` decides what the store holds next;
+without it, the other tab's copy wins. Folds see and may set `app`, and a newer build's meta is read but never written
+over.
+
 ### Migrating what an app kept before sync
 
 A `Fold` reads keys the app wrote before it synced (a single JSON save, say) and merges them into the store, at boot
@@ -154,7 +181,8 @@ sync. Every request gives up after 15 s as no connection.
 
 ## Local storage
 
-Under the model's `prefix`: `meta` (account, public id, clock, forwards owed, purged keys still to delete), `acks`
+Under the model's `prefix`: `meta` (account, public id, clock, forwards owed, purged keys still to delete, and the
+app's own fields), `acks`
 (per room and key, the hash of the doc the server was last seen holding: the outbox is derived from these, there is no
 queue), and one key per record (its room key with each `/` as a `.`). A write storage refuses is not remembered as
 written, so the next one tries again. Storage written by a newer build (its meta's `v` above the model's

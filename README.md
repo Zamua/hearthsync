@@ -176,7 +176,7 @@ const cork: Kind<Cork> = {
     docs: r => ({ id: { v: 1, id: r.id }, title: { v: 1, title: r.title }, ...pinDocs(r.pins) }),  // pin/<id> each
     read: (snapshot, key) => corkFromKeys(snapshot, key),  // whatever keys are there; null for none of its own
     once: key => key === 'id',        // written once: any value there counts as saved, never written over
-    owes: r => r.u > 0,               // a record deleted before any use here owes its room nothing
+    owes: r => r.u > 0,               // deleted before any use, with nothing acknowledged in its room: owes it nothing
   },
   register: { get: r => r.room, set: (r, room) => ({ ...r, room }) },  // optional: the room register in the record
 };
@@ -206,7 +206,8 @@ An app that already keeps a live copy of a shared room (a socket's) hands it ove
 after it changes plans against it shortly, a burst once, whenever a pass could run (started, online, not paused or
 backing off). Before `ready`, `kv` must hold every key the server holds, and after, every PUT the server took (this
 device's too). Still, a copy may be behind, so it counts as a read of the keys it holds: a key it lacks is never taken
-as gone, and a write-once key it lacks is never written. A feed of the account room is ignored, as its reads also
+as gone, and a write-once key it lacks is never written: while this device owes the room such a key, rounds read the
+server instead. A feed of the account room is ignored, as its reads also
 decide what other devices purged. `sync.hold(true)` makes passes leave the account room for
 later while shared rooms still sync (a realtime session that should not wait on uploads); `sync.hold(false)` runs what
 waited.
@@ -218,7 +219,8 @@ an account with both:
 
 - **The `shared` doc** takes format 2 once it lists a leave (`LEFT`), which 0.2 reads as a newer build's doc and leaves
   alone (its status says `newer`), rather than writing it back without the leave each round. It then learns of no new
-  shared rooms from the account room.
+  shared rooms from the account room, and a share a 0.2 device makes meanwhile never reaches the format 2 doc, so the
+  account's 0.3 devices never learn of it.
 - **A record this account left, or deleted with `deletes: 'account'`,** is still in the room as far as a 0.2 device
   knows: it uploads the tombstone there (gone for every member) and carries later private edits into the room.
 - **A laid out record** is read by 0.2 as a whole record its room never holds: peeks and joins of it fail.

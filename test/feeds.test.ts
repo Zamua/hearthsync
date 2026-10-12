@@ -1,18 +1,24 @@
 import { describe, it, expect } from 'vitest';
+import type { Kind, Model } from '../src/model.js';
+import { dirty } from '../src/plan.js';
 import { device, fakeWorld, type Device, type FakeRooms, type TestClock } from '../src/testing/index.js';
-import { corkKey, corks, editCork, leaveCork, type Cork } from './models.js';
+import { corkKey, corkKind, corks, editCork, leaveCork, type Cork } from './models.js';
 
 const C1 = corkKey('c1');
 const account = <R>(d: Device<R>) => d.local.store.account!;
 const cork = (d: Device<Cork>, o: { title?: string; pin?: string } = {}) => d.local.edit((s, now) => editCork(s, 'c1', now, o));
 const puts = (d: Device<Cork>, room: string) => d.sent.filter(l => l.startsWith(`PUT /api/rooms/${room}/`));
 
+/** Corkboards whose pins are written once too. */
+const onceKind: Kind<Cork> = { ...corkKind, layout: { ...corkKind.layout!, once: k => k === 'id' || k === 'made' || k.startsWith('pin/') } };
+const onceCorks: Model<Cork> = { ...corks, prefix: 'oncecorks.v1.', kind: key => (corks.kind(key) ? onceKind : null) };
+
 /** a shares a corkboard; b, another account, joins it, starts its engine and feeds the room from a live copy. */
-async function fed(host: FakeRooms, clock: TestClock) {
-  const a = device(host, clock, corks, 'a');
+async function fed(host: FakeRooms, clock: TestClock, model: Model<Cork> = corks) {
+  const a = device(host, clock, model, 'a');
   cork(a, { title: 'trip', pin: 'map' });
   await a.sync.sync();
-  const room = await a.sync.share(C1), b = device(host, clock, corks, 'b');
+  const room = await a.sync.share(C1), b = device(host, clock, model, 'b');
   await b.sync.join(room);
   await b.sync.sync();
   const kv = new Map(Object.entries(host.snapshot(room)));
@@ -64,6 +70,17 @@ describe('a feed and the engine around it', () => {
     await clock.advance(1000, [a, b]);
     expect(puts(b, room).filter(l => /\/(id|made)$/.test(l))).toEqual([]);
     expect(host.snapshot(room)['pin/p']).toBeTruthy();
+  });
+
+  it('a write-once key made while fed, which the copy lacks, is read for and uploaded', async () => {
+    const { host, clock } = fakeWorld(), { a, b, room } = await fed(host, clock, onceCorks);
+    cork(b, { pin: 'entry' });
+    b.sync.fed(room);
+    await clock.advance(1000, [a, b]);
+    await b.sync.sync({ full: true });
+    expect(host.snapshot(room)['pin/entry']).toBeTruthy();
+    expect(dirty(onceCorks, b.local.store)).toEqual([]);
+    expect(b.sync.status.items[C1]).toBe('saved');
   });
 
   it('a key missing from the copy is not taken as absent: what the device holds stays acknowledged', async () => {

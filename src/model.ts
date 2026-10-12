@@ -99,7 +99,10 @@ export interface RoomLayout<R> {
    * same value (one derived from the record's id, say).
    */
   once?(key: string): boolean;
-  /** Whether a deleted record this device never uploaded to its room still owes it its keys; true by default. */
+  /**
+   * Whether a deleted record still owes its room its keys while this device holds no acknowledgement there (none from
+   * an upload, nor from a read); true by default.
+   */
   owes?(r: R): boolean;
 }
 

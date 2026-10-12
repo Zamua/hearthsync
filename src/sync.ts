@@ -780,13 +780,18 @@ export class Sync<R, A = undefined> {
   /**
    * A room's fed copy as a read of some of its keys: those it holds, and those this device may write that it lacks. A
    * copy may be behind the server, so a key it lacks is never taken as gone, nor a write-once key as unwritten. None
-   * for the account room, whose reads also decide what other devices purged.
+   * for the account room, whose reads also decide what other devices purged, nor while a write-once key this device
+   * owes the room is missing from it: that round reads the server.
    */
   private fedRead(room: string): { remote: Snapshot; keys: string[] } | null {
     const feed = this.feeds.get(room), s = this.local.store;
     if (!feed?.ready || room === s.account) return null;
     const remote = Object.fromEntries(feed.kv), once = writtenOnce(this.m, s, room), keys = new Set(Object.keys(remote));
-    for (const p of dirty(this.m, s)) if (p.room === room && !once(p.key)) keys.add(p.key);
+    for (const p of dirty(this.m, s)) {
+      if (p.room !== room) continue;
+      if (!once(p.key)) keys.add(p.key);
+      else if (!feed.kv.has(p.key)) return null;
+    }
     return { remote, keys: [...keys] };
   }
 
@@ -795,10 +800,9 @@ export class Sync<R, A = undefined> {
     await this.exclusive(async () => {
       const now = this.env.now();
       if (!this.started || !this.env.online() || now < this.pausedUntil || now < this.backoffUntil || this.gone.has(room) || this.dropped.has(room)) return;
-      const fed = this.fedRead(room);
-      if (!fed) return;
-      const before = this.local.store.records;
-      try { await this.apply(room, fed.remote, fed.keys); } catch (e) { this.failed(e); }
+      if (!this.feeds.get(room)?.ready || room === this.local.store.account) return;
+      const fed = this.fedRead(room), before = this.local.store.records;
+      try { await (fed ? this.apply(room, fed.remote, fed.keys) : this.round(room, false)); } catch (e) { this.failed(e); }
       if (room !== this.local.store.account && this.local.store.records !== before) this.changed();
     }).catch(() => {});
   }

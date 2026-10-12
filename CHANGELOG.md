@@ -16,7 +16,8 @@ Added:
 Changed:
 
 - `followRoom` takes the model first, as the other store functions do: `followRoom(m, s, from, to, now)`.
-- The account room's `shared` doc is written as format 2 while it lists a leave.
+- The account room's `shared` doc is written as format 2 while it lists a leave. A share made meanwhile on a 0.2 device
+  never reaches it, so the account's 0.3 devices do not learn of that room.
 
 Upgrading: a 0.2 device on the same account ignores layouts, leaves and `deletes: 'account'` (see "Older builds on the
 same account" in the README). Give a model whose kinds adopt any of them a new `Model.version`.

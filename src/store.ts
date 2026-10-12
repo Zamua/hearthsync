@@ -1,9 +1,9 @@
-import type { AccountDoc } from './account.js';
+import { ACCOUNT_KEY, type AccountDoc } from './account.js';
 import { isRoomId } from './code.js';
-import { UNTIMED, canon, tick, type Stamp } from './crdt.js';
+import { UNTIMED, canon, regsMerge, tick, type Regs, type Stamp } from './crdt.js';
 import { publicId } from './identity.js';
-import { samePlay, type Kind, type Model, type Playthrough } from './model.js';
-import { homeKind, kindOf, mergeRecords, stampOf, tombstoneOf, type Records } from './records.js';
+import { samePlay, type Kind, type Model, type Playthrough, type Snapshot } from './model.js';
+import { homeKind, isLive, kindOf, mergeRecords, ownsRoom, recordsIn, stampOf, tombstoneOf, type Records } from './records.js';
 
 // This device's copy of the account: the only thing the app reads, written before any network call. Every edit takes
 // the wall clock (plus server skew) and stamps through the store's clock.
@@ -26,11 +26,16 @@ export interface LocalStore<R, A = undefined> {
   purge: Readonly<Record<string, Stamp>>;
   /** The app's own state, kept in the meta (`Model.meta`). */
   app: A;
+  /** The room each shared record lives in, by its key: the last move wins. */
+  shared: Regs<string>;
 }
 
 /** A store with nothing in it yet; app is the app's starting state (its meta hook's read of `{}`). */
 export const emptyStore = <R, A = undefined>(app: A = undefined as A): LocalStore<R, A> =>
-  ({ account: null, profile: null, clock: 0, records: {}, acks: {}, forwards: {}, purge: {}, app });
+  ({ account: null, profile: null, clock: 0, records: {}, acks: {}, forwards: {}, purge: {}, shared: {}, app });
+
+/** The highest stamp of the shared rooms' registers. */
+export const sharedStamp = (shared: Regs<string>): Stamp => Math.max(0, ...Object.values(shared).map(r => r.t));
 
 /** An edit of the records, given the next stamp; the store itself when f hands them back unchanged. */
 export function editRecords<R, A>(s: LocalStore<R, A>, now: number, f: (records: Records<R>, t: Stamp) => Records<R>): LocalStore<R, A> {
@@ -157,4 +162,54 @@ export function forwardDone<R, A>(s: LocalStore<R, A>, from: string): LocalStore
   if (!Object.hasOwn(s.forwards, from)) return s;
   const { [from]: _, ...forwards } = s.forwards;
   return { ...s, forwards };
+}
+
+/** Keys moved to a room at the next stamp; s itself when none moves. */
+function moveTo<R, A>(s: LocalStore<R, A>, keys: readonly string[], room: string, now: number): LocalStore<R, A> {
+  const move = keys.filter(k => s.shared[k]?.val !== room);
+  if (!move.length || !isRoomId(room)) return s;
+  const t = tick(s.clock, now);
+  return { ...s, clock: t, shared: regsMerge(s.shared, Object.fromEntries(move.map(k => [k, { val: room, t }]))) };
+}
+
+/** The record at key lives in this room now (just made by POST). */
+export const shareRecord = <R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string, room: string, now: number): LocalStore<R, A> =>
+  ownsRoom(m, key) && s.records[key] !== undefined ? moveTo(s, [key], room, now) : s;
+
+/** Records of a retired room move to the room it forwards to. */
+export const followRoom = <R, A>(s: LocalStore<R, A>, from: string, to: string, now: number): LocalStore<R, A> =>
+  moveTo(s, Object.keys(s.shared).filter(k => s.shared[k]!.val === from), to, now);
+
+/**
+ * The live shared record a room holds: its key (the smallest, should it hold several); null for none, and for an
+ * account room, which holds a manifest or records of the account's own.
+ */
+export function sharedKey<R>(m: Model<R, unknown>, snapshot: Snapshot): string | null {
+  if (ACCOUNT_KEY in snapshot || Object.keys(snapshot).some(k => kindOf(m, k) !== null && !ownsRoom(m, k))) return null;
+  const records = recordsIn(m, snapshot);
+  return Object.keys(records).filter(k => ownsRoom(m, k) && isLive(m, k, records[k]!)).sort()[0] ?? null;
+}
+
+/**
+ * Joining a shared record from its room (an invite): the room's copy merges in as another device's edit would, and the
+ * record syncs with that room from now on. A key this device purged comes back. none: the room holds no live shared
+ * record; full: a new record past its kind's cap, with no tombstone to make way.
+ */
+export function joinRoom<R, A>(
+  m: Model<R, unknown>, s: LocalStore<R, A>, room: string, snapshot: Snapshot, now: number,
+): { store: LocalStore<R, A>; key: string } | 'none' | 'full' {
+  const key = sharedKey(m, snapshot);
+  if (key === null || !isRoomId(room)) return 'none';
+  let base = purgeDone(s, key);
+  if (!(key in s.records)) {
+    const k = homeKind(m, key)!;
+    if (k.cap !== undefined && count(m, s, k) >= k.cap) {
+      const drop = oldestTombstone(m, s, x => kindOf(m, x) === k);
+      if (!drop) return 'full';
+      base = purgeRecord(m, base, drop);
+    }
+  }
+  const records = mergeRecords(m, base.records, { [key]: recordsIn(m, snapshot)[key]! });
+  base = { ...base, clock: Math.max(base.clock, stampOf(m, records)), records };
+  return { store: moveTo(base, [key], room, now), key };
 }

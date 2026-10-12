@@ -26,7 +26,7 @@ function push<R>(srv: Server, p: Plan<R>): LocalStore<R> {
 
 /** One read, merge and upload of the account room. moved counts puts and news: anything that moved. */
 function round<R>(m: Model<R>, s: LocalStore<R>, srv: Server): { store: LocalStore<R>; moved: number } {
-  const room = roomsOf(s)[0];
+  const room = roomsOf(m, s)[0];
   if (!room) return { store: s, moved: 0 };
   const p = plan(m, s, room, snap(srv, room));
   return { store: push(srv, p), moved: p.puts.length + p.news.length };

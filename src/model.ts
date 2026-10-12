@@ -49,6 +49,11 @@ export interface Kind<R> {
    * written, and is read again only when it changed since last seen.
    */
   home?(r: R): string;
+  /**
+   * 'own': a record can also live in a room of its own, shared with other accounts by that room's id (`Sync.share`,
+   * `Sync.join`). The account room still keeps it, and which room it is in. 'account' (the default): that room only.
+   */
+  room?: 'account' | 'own';
 }
 
 /**
@@ -75,7 +80,10 @@ export interface Fold<R, A = undefined> {
 export interface AppMeta<A> {
   /** The app's state from the meta as storage holds it (`{}` when there is none). Unchecked: repair it. */
   read(meta: Readonly<Record<string, unknown>>): A;
-  /** The fields to keep in the meta. The library's own (`v`, `account`, `profile`, `clock`, `forwards`, `purge`) win. */
+  /**
+   * The fields to keep in the meta. The library's own (`v`, `account`, `profile`, `clock`, `forwards`, `purge`,
+   * `shared`) win.
+   */
   write(app: A): Record<string, unknown>;
   /** This tab's state and the one another tab wrote since, as the store holds them next. Without it, the other tab's wins. */
   merge?(mine: A, theirs: A): A;
@@ -97,8 +105,8 @@ export interface Model<R, A = undefined> {
   purgeAfter?: number;
   /**
    * The kind of record a room key holds, the same object for every key of a kind (a cap counts by it); null for a key
-   * that is not the app's (and always for `account` and `forward`). Keys hold no dot: a record is kept in local storage
-   * under its key with each `/` as a `.`.
+   * that is not the app's (and always for `account`, `shared` and `forward`). Keys hold no dot: a record is kept in
+   * local storage under its key with each `/` as a `.`.
    */
   kind(key: string): Kind<R> | null;
   /** The app's own state in the store's meta, on `LocalStore.app`. Without it, `app` is undefined. */

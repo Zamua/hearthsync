@@ -1,4 +1,4 @@
-import { ACCOUNT_KEY, DOC, FORWARD_KEY, isNewer } from './account.js';
+import { ACCOUNT_KEY, DOC, FORWARD_KEY, SHARED_KEY, isNewer } from './account.js';
 import { canon, type Stamp } from './crdt.js';
 import { samePlay, type Kind, type Model, type Snapshot } from './model.js';
 
@@ -7,10 +7,13 @@ import { samePlay, type Kind, type Model, type Snapshot } from './model.js';
 export type Records<R> = Readonly<Record<string, R>>;
 
 /** The kind of the record at a room key; null for keys that are not the app's. */
-export const kindOf = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => (key === ACCOUNT_KEY || key === FORWARD_KEY ? null : m.kind(key));
+export const kindOf = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => (key === ACCOUNT_KEY || key === SHARED_KEY || key === FORWARD_KEY ? null : m.kind(key));
 
 /** The kind of a key records live at: the app's, and not one an earlier build wrote. */
 export const homeKind = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => { const k = kindOf(m, key); return k && !k.home ? k : null; };
+
+/** Whether the record at key can live in a room of its own. */
+export const ownsRoom = <R>(m: Model<R, unknown>, key: string): boolean => homeKind(m, key)?.room === 'own';
 
 export const versionOf = <R>(m: Model<R, unknown>): number => m.version ?? DOC;
 

@@ -1,12 +1,12 @@
 import { isRoomId } from './code.js';
-import { isStamp, type Stamp } from './crdt.js';
-import { isObj, isPid } from './repair.js';
+import { isStamp, regsMerge, type Reg, type Regs, type Stamp } from './crdt.js';
+import { MAX_MEMBERS, isObj, isPid, regFrom } from './repair.js';
 
-// The docs an account room holds besides the app's: its manifest, and on a retired room, where its account lives now.
-// Every synced doc carries its format as `v`.
+// The docs an account room holds besides the app's: its manifest, the rooms its shared records live in, and on a
+// retired room (an account's or a shared record's), where it lives now. Every synced doc carries its format as `v`.
 
-/** Room keys of the manifest and the forward, never an app's. */
-export const ACCOUNT_KEY = 'account', FORWARD_KEY = 'forward';
+/** Room keys of the manifest, the shared rooms and the forward, never an app's. */
+export const ACCOUNT_KEY = 'account', SHARED_KEY = 'shared', FORWARD_KEY = 'forward';
 
 /** The format of the manifest and forwards, and the default of an app's docs. */
 export const DOC = 1;
@@ -38,5 +38,18 @@ export function mergeForward(a: ForwardDoc, b: ForwardDoc): ForwardDoc {
   return a.to <= b.to ? a : b;
 }
 
+/** Each shared record's room, by its key, from untrusted JSON: only keys ok passes. */
+export function sharedRegs(raw: unknown, ok: (key: string) => boolean): Regs<string> {
+  if (!isObj(raw)) return {};
+  const out: Record<string, Reg<string>> = {};
+  for (const [k, v] of Object.entries(raw).slice(0, MAX_MEMBERS)) { const r = regFrom(v, isRoomId); if (r && ok(k)) out[k] = r; }
+  return regsMerge({}, out);
+}
+
+/** The shared rooms an account room lists; none from a newer build's doc. */
+export const sharedFrom = (raw: unknown, ok: (key: string) => boolean): Regs<string> =>
+  isObj(raw) && !isNewer(raw) ? sharedRegs(raw.rooms, ok) : {};
+
 export const accountDoc = (a: AccountDoc) => ({ v: DOC, ...a });
 export const forwardDoc = (to: string, at: Stamp) => ({ v: DOC, to, at });
+export const sharedDoc = (rooms: Regs<string>) => ({ v: DOC, rooms });

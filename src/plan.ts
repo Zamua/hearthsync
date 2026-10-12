@@ -1,11 +1,12 @@
-import { ACCOUNT_KEY, DOC, FORWARD_KEY, accountDoc, accountFrom, forwardFrom, isNewer, mergeAccount } from './account.js';
-import { canon, hash } from './crdt.js';
+import { ACCOUNT_KEY, DOC, FORWARD_KEY, SHARED_KEY, accountDoc, accountFrom, forwardFrom, isNewer, mergeAccount, sharedDoc, sharedFrom } from './account.js';
+import { canon, hash, regsMerge } from './crdt.js';
 import type { Model, Snapshot } from './model.js';
-import { docOf, docsOf, isLive, kindOf, mergeRecords, recordsIn, stampOf, tombstoneOf, versionOf, type MergeMode, type Records } from './records.js';
-import type { LocalStore } from './store.js';
+import { docOf, docsOf, isLive, kindOf, mergeRecords, ownsRoom, recordsIn, stampOf, tombstoneOf, versionOf, type MergeMode, type Records } from './records.js';
+import { sharedStamp, type LocalStore } from './store.js';
 
 // Sync as data: what each room should hold (the projection), what the server has not confirmed (the derived outbox),
-// and one round's merge of a read into the store (the plan). The engine only fetches, PUTs and acknowledges.
+// and one round's merge of a read into the store (the plan). The engine only fetches, PUTs and acknowledges. Rooms are
+// the account's, and one per shared record: it holds that record's doc, as the account room does.
 
 export interface Put { room: string; key: string; value: unknown; hash: string }
 
@@ -24,11 +25,22 @@ export interface Plan<R, A = undefined> {
 export function accountDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (s.profile) out[ACCOUNT_KEY] = accountDoc(s.profile);
+  if (Object.keys(s.shared).length) out[SHARED_KEY] = sharedDoc(s.shared);
   return Object.assign(out, docsOf(m, s.records));
 }
 
+/** A shared room as this device would have it: the docs of the records living there. */
+function sharedDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, reg] of Object.entries(s.shared)) {
+    const r = s.records[key];
+    if (reg.val === room && r !== undefined && ownsRoom(m, key)) out[key] = docOf(m, key, r);
+  }
+  return out;
+}
+
 export function roomDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string): Record<string, unknown> {
-  return room === s.account ? accountDocs(m, s) : {};
+  return room === s.account ? accountDocs(m, s) : sharedDocs(m, s, room);
 }
 
 /** The ack of a key holding a newer build's doc: this build must not overwrite it, so it counts as saved. */
@@ -39,22 +51,33 @@ const clean = <R, A>(s: LocalStore<R, A>, room: string, key: string, doc: unknow
   return ack !== undefined && (ack === NEWER || ack === hash(doc));
 };
 
-/** Rooms to sync: the account's, once it has one. */
-export const roomsOf = <R, A>(s: LocalStore<R, A>): string[] => (s.account ? [s.account] : []);
+/**
+ * Rooms to sync: the account's, once it has one, then each shared record's while it is live (or its tombstone has not
+ * reached its room yet).
+ */
+export function roomsOf<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): string[] {
+  const out = new Set(s.account ? [s.account] : []);
+  for (const [key, { val: room }] of Object.entries(s.shared)) {
+    const r = s.records[key];
+    if (r === undefined || out.has(room) || !ownsRoom(m, key)) continue;
+    if (isLive(m, key, r) || !clean(s, room, key, docOf(m, key, r))) out.add(room);
+  }
+  return [...out];
+}
 
 /** Every doc the server has not confirmed holding, in rooms that exist. */
 export function dirty<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Put[] {
   const out: Put[] = [];
-  for (const room of roomsOf(s)) for (const [key, doc] of Object.entries(roomDocs(m, s, room))) if (!clean(s, room, key, doc)) out.push({ room, key, value: doc, hash: hash(doc) });
+  for (const room of roomsOf(m, s)) for (const [key, doc] of Object.entries(roomDocs(m, s, room))) if (!clean(s, room, key, doc)) out.push({ room, key, value: doc, hash: hash(doc) });
   return out;
 }
 
 /** A doc of a later format than this build writes: the manifest and forward have the library's, the rest the app's. */
-const newerDoc = <R, A>(m: Model<R, unknown>, key: string, raw: unknown): boolean => isNewer(raw, key === ACCOUNT_KEY || key === FORWARD_KEY ? DOC : versionOf(m));
+const newerDoc = <R, A>(m: Model<R, unknown>, key: string, raw: unknown): boolean => isNewer(raw, key === ACCOUNT_KEY || key === SHARED_KEY || key === FORWARD_KEY ? DOC : versionOf(m));
 
 /**
- * A room's records merged in. A key this device purged is not taken back unless a use made after its tombstone
- * revived it.
+ * A room's records, and the rooms of its shared ones, merged in. A key this device purged is not taken back unless a
+ * use made after its tombstone revived it.
  */
 function mergeIn<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snapshot, mode: MergeMode): LocalStore<R, A> {
   const incoming: Record<string, R> = {}, purge: Record<string, number> = { ...s.purge };
@@ -67,8 +90,11 @@ function mergeIn<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snap
     incoming[key] = r;
   }
   const records = mergeRecords(m, s.records, incoming, mode), revived = Object.keys(purge).length !== Object.keys(s.purge).length;
-  if (records === s.records && !revived) return s;
-  return { ...s, clock: Math.max(s.clock, stampOf(m, records)), records, purge: revived ? purge : s.purge };
+  const read = sharedFrom(snapshot[SHARED_KEY], k => ownsRoom(m, k)), shared = Object.keys(read).length ? regsMerge(s.shared, read) : s.shared;
+  const moved = shared !== s.shared && canon(shared) !== canon(s.shared);
+  if (records === s.records && !revived && !moved) return s;
+  const clock = Math.max(s.clock, stampOf(m, records), sharedStamp(shared));
+  return { ...s, clock, records, purge: revived ? purge : s.purge, shared: moved ? shared : s.shared };
 }
 
 /**
@@ -86,7 +112,7 @@ function purgedThere<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: stri
   return records === s.records ? s : { ...s, records };
 }
 
-/** The account room's records merged in. Its manifest and forward are not. */
+/** The account room's records and shared rooms merged in. Its manifest and forward are not. */
 export const absorbAccount = <R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snapshot): LocalStore<R, A> => mergeIn(m, s, snapshot, 'absorb');
 
 /**
@@ -107,7 +133,8 @@ export function changed<R>(a: Records<R>, b: Records<R>): string[] {
  * One round for one room: merge what was read into the store, then list what to PUT. remote is the room's scan; with
  * keys, only those keys were read, and a key missing from remote is absent on the server. A key an earlier build wrote
  * is taken in only when it changed since it was last seen there (its ack), so a record deleted since does not come
- * back from it. Pure and idempotent: planning twice against the same read changes nothing more.
+ * back from it. From a shared room, only the records living there are taken. Pure and idempotent: planning twice
+ * against the same read changes nothing more.
  */
 export function plan<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string, remote: Snapshot, keys?: readonly string[]): Plan<R, A> {
   const inScope = (k: string) => !keys || keys.includes(k);
@@ -123,11 +150,15 @@ export function plan<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: stri
     next = absorbAccount(m, purgedThere(m, s, room, read, inScope), fresh);
     const a = newer.includes(ACCOUNT_KEY) ? null : accountFrom(read[ACCOUNT_KEY]);
     if (a) next = { ...next, profile: next.profile ? mergeAccount(next.profile, a) : a };
-    const f = newer.includes(FORWARD_KEY) ? null : forwardFrom(read[FORWARD_KEY]);
-    if (f && f.to !== room) forward = f.to;
+  } else {
+    const here: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(read)) if (s.shared[k]?.val === room) here[k] = v;
+    next = mergeIn(m, s, here, 'absorb');
   }
+  const f = newer.includes(FORWARD_KEY) ? null : forwardFrom(read[FORWARD_KEY]);
+  if (f && f.to !== room) forward = f.to;
 
-  const clock = Math.max(next.clock, stampOf(m, next.records));
+  const clock = Math.max(next.clock, stampOf(m, next.records), sharedStamp(next.shared));
 
   const acks: Record<string, string> = { ...(next.acks[room] ?? {}) }, puts: Put[] = [];
   const docs = roomDocs(m, next, room);

@@ -1,16 +1,20 @@
 import { FORWARD_KEY, ACCOUNT_KEY, forwardDoc, forwardFrom } from './account.js';
-import { codeFromRoom, parseCode, type CodeError } from './code.js';
+import { codeFromRoom, isRoomId, parseCode, type CodeError } from './code.js';
 import { canon, tick } from './crdt.js';
 import { resolveForward, tagOf } from './identity.js';
 import type { Local } from './local.js';
-import { kindOf, recordsIn, type Records } from './records.js';
+import { isLive, kindOf, mergeRecords, ownsRoom, recordsIn, type Records } from './records.js';
 import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, type Chip, type Put } from './plan.js';
 import { RoomError, type RoomApi } from './rooms.js';
-import { adoptAccount, expire, forwardDone, oldestTombstone, purgeDone, purgeRecord, queueForward, switchAccount, type LocalStore } from './store.js';
+import {
+  adoptAccount, expire, followRoom, forwardDone, joinRoom, oldestTombstone, purgeDone, purgeRecord, queueForward, shareRecord, sharedKey, switchAccount,
+  type LocalStore,
+} from './store.js';
 
-// The sync engine: the device's store and its account room, reconciled in the background. The domain decides what to
-// merge and what to PUT (plan.ts); this runs rounds against the room, acknowledges what the server took, backs off when
-// it cannot, and tells the UI how things stand. The app never waits on it.
+// The sync engine: the device's store, its account room and the rooms of its shared records, reconciled in the
+// background. The domain decides what to merge and what to PUT (plan.ts); this runs rounds against the rooms,
+// acknowledges what the server took, backs off when it cannot, and tells the UI how things stand. The app never waits
+// on it.
 
 /** A local change is saved this long after changes stop, and never later than MAX_WAIT after the first. */
 const DEBOUNCE = 15_000, MAX_WAIT = 60_000;
@@ -18,7 +22,7 @@ const DEBOUNCE = 15_000, MAX_WAIT = 60_000;
 const FULL_EVERY = 5 * 60_000, AWAY = 60_000;
 /** A room with at most this many dirty keys, scanned fully under FULL_EVERY ago, reads just those keys. */
 const LIGHT_MAX = 4;
-/** Rounds until one moves nothing; bounded, as two devices clobbering each other can keep it busy. */
+/** Rounds over every room until one moves nothing; bounded, as two devices clobbering each other can keep it busy. */
 const MAX_LAPS = 4;
 const BACKOFF_MIN = 2000, BACKOFF_MAX = 5 * 60_000, PAUSE_FULL = 30 * 60_000, RATE_MAX = 3600;
 /**
@@ -39,7 +43,7 @@ const KEEPALIVE_BYTES = 60_000;
 
 export type ItemChip = Chip | 'failed';
 export type SyncState = 'offline' | 'syncing' | 'saved' | 'error';
-/** full: the room or the app hit its cap. lost: the account room is gone. failing: uploads keep failing. rate: no code yet, the server makes no more rooms for now. */
+/** full: a room or the app hit its cap. lost: the account room is gone. failing: uploads keep failing. rate: no code yet, the server makes no more rooms for now. */
 export type SyncProblem = 'full' | 'lost' | 'failing' | 'rate';
 
 export interface SyncStatus {
@@ -59,6 +63,8 @@ export interface SyncStatus {
   newer: boolean;
   /** With problem 'rate': when the next try to make the account room goes out. */
   retryAt: number | null;
+  /** Keys of shared records whose room is gone: they sync with the account only, until shared again. */
+  gone: string[];
 }
 
 export interface SyncEvents {
@@ -78,6 +84,9 @@ export interface Linked { pending: boolean }
 
 /** What a code holds, before linking or merging. */
 export interface Peek<R> { code: string; records: Records<R>; same: boolean }
+
+/** A shared record as its room holds it (merged with this device's copy), and the room it lives in now. */
+export interface Shared<R> { key: string; room: string; record: R }
 
 export class SyncError extends Error {
   constructor(readonly kind: SyncFailure, readonly detail?: CodeError) { super(`sync: ${kind}${detail ? ` (${detail})` : ''}`); }
@@ -120,6 +129,9 @@ export class Sync<R, A = undefined> {
   private rateHits = 0;
   private accountMissingAt: number | null = null;
   private lostAccount = false;
+  /** Shared rooms answering 404, since when; gone once that spans LOST_GAP, as for the account room. */
+  private sharedMissingAt = new Map<string, number>();
+  private gone = new Set<string>();
   /** Rooms at their cap (413): until the next full scan, only keys already there are updated. */
   private full = new Set<string>();
   /** Rooms the server refuses as malformed (400). */
@@ -239,6 +251,71 @@ export class Sync<R, A = undefined> {
 
   // Operations for the UI. Each needs a connection and fails with a SyncError.
 
+  /**
+   * Shares the record at key: its room is made on the first share (or when the last one is gone), and everything
+   * uploaded. The room id is the invite. Sharing again returns the same room.
+   */
+  share(key: string): Promise<string> {
+    return this.op(async () => {
+      this.local.reload();
+      const s = this.local.store, r = s.records[key];
+      if (r === undefined || !ownsRoom(this.m, key) || !isLive(this.m, key, r)) throw new SyncError('notfound');
+      let room = s.shared[key]?.val;
+      if (!room || this.gone.has(room) || this.dropped.has(room)) {
+        const made = await this.api.create();
+        this.local.edit((st, now) => shareRecord(this.m, st, key, made, now), 'sync');
+        this.scanned(made, {});
+        await this.apply(made, {});
+        room = made;
+      }
+      for (let i = 0; i < MAX_LAPS && this.roomDirty(room); i++) await this.round(room, true);
+      if (this.unsaved(room)) throw new SyncError(this.full.has(room) ? 'full' : 'failed');
+      this.soon();
+      return room;
+    });
+  }
+
+  /** A shared record as its room holds it, for the question before joining. Offline, this device's copy if it has one. */
+  async peek(room: string): Promise<Shared<R>> {
+    const known = this.byRoom(room);
+    try {
+      return await this.op(async () => {
+        const w = await this.readShared(room);
+        const theirs = recordsIn(this.m, w.snapshot), mine = this.local.store.records[w.key];
+        const record = mine === undefined ? theirs[w.key]! : mergeRecords(this.m, { [w.key]: mine }, theirs)[w.key]!;
+        return { key: w.key, room: w.room, record };
+      });
+    } catch (e) {
+      if (known && e instanceof SyncError && e.kind === 'offline') return known;
+      throw e;
+    }
+  }
+
+  /**
+   * Joins a shared record from its room (an invite): it merges in, syncs with that room from now on, and is backed up
+   * with the account. Its key is returned. Offline, a record this device already holds there is joined already.
+   */
+  async join(room: string): Promise<string> {
+    const known = this.byRoom(room);
+    try {
+      return await this.op(async () => {
+        const w = await this.readShared(room);
+        let got = 'none' as ReturnType<typeof joinRoom<R, A>>;
+        this.local.edit((s, now) => { got = joinRoom(this.m, s, w.room, w.snapshot, now); return typeof got === 'string' ? s : got.store; }, 'sync');
+        if (got === 'full') throw new SyncError('full');
+        if (got === 'none') throw new SyncError('notfound');
+        this.scanned(w.room, w.snapshot);
+        // The record is this device's now: a failed upload is left to later passes.
+        await this.upload(w.room, w.snapshot);
+        this.changed();
+        return w.key;
+      });
+    } catch (e) {
+      if (known && e instanceof SyncError && e.kind === 'offline') return known.key;
+      throw e;
+    }
+  }
+
   /** What is saved under a code, for the question before linking or merging. */
   async peekCode(text: string): Promise<Peek<R>> {
     const c = this.parse(text);
@@ -337,8 +414,11 @@ export class Sync<R, A = undefined> {
       let quiet = false;
       for (let lap = 0; lap < MAX_LAPS && !quiet; lap++) {
         quiet = true;
-        const room = this.next();
-        if (room && await this.round(room, full && lap === 0)) quiet = false;
+        const done = new Set<string>();
+        for (let room = this.next(done); room; room = this.next(done)) {
+          done.add(room);
+          if (await this.round(room, full && lap === 0)) quiet = false;
+        }
       }
       await this.purgeKeys();
       await this.writeForwards();
@@ -359,10 +439,9 @@ export class Sync<R, A = undefined> {
     if (keys.length && !this.madeAccount) this.emit('backlog', { keys, at: this.env.now() });
   }
 
-  /** The account room, unless the server refuses it. */
-  private next(): string | null {
-    const room = roomsOf(this.local.store)[0];
-    return room && !this.dropped.has(room) ? room : null;
+  /** The account room first, then shared ones; none the server refuses, nor one gone. */
+  private next(done: ReadonlySet<string>): string | null {
+    return roomsOf(this.m, this.local.store).find(r => !done.has(r) && !this.dropped.has(r) && !this.gone.has(r)) ?? null;
   }
 
   /** Reads, merges and uploads one room: whether anything moved. */
@@ -402,7 +481,7 @@ export class Sync<R, A = undefined> {
         if (e instanceof RoomError && e.status === 404) return null;
         throw e;
       }
-      this.accountOk(room);
+      this.answered(room);
     }
     return remote;
   }
@@ -420,12 +499,12 @@ export class Sync<R, A = undefined> {
     this.serverKeys.set(room, new Set(Object.keys(remote)));
     // A full room may have room again (keys deleted elsewhere): new keys get one more try each full scan.
     this.full.delete(room);
-    this.accountOk(room);
+    this.answered(room);
   }
 
-  /** The account room answered: any 404 before was a fault on the way, not a lost room. */
-  private accountOk(room: string): void {
-    if (room !== this.local.store.account) return;
+  /** The room answered: any 404 before was a fault on the way, not a lost room. */
+  private answered(room: string): void {
+    if (room !== this.local.store.account) { this.sharedMissingAt.delete(room); this.gone.delete(room); return; }
     this.accountMissingAt = null;
     this.lostAccount = false;
   }
@@ -435,8 +514,8 @@ export class Sync<R, A = undefined> {
     // The plan replaces the store whole, so it must start from what another tab may have written during the read.
     this.local.reload();
     const s = this.local.store;
-    // The room left sync while it was read (an account switch).
-    if (room !== s.account) return false;
+    // The room left sync while it was read (an account switch, a shared record moved).
+    if (room !== s.account && !roomsOf(this.m, s).includes(room)) return false;
     const p = plan(this.m, s, room, this.cycleHeads.has(room) ? without(remote, FORWARD_KEY) : remote, keys);
     this.local.edit(() => p.store, 'sync');
     if (p.newer.length) this.newer = true;
@@ -454,7 +533,7 @@ export class Sync<R, A = undefined> {
       if (!await this.putOne(put, keepalive)) continue;
       sent++;
       this.netDown = false;
-      this.accountOk(put.room);
+      this.answered(put.room);
       this.local.edit(s => acknowledge(s, put.room, put.key, put.hash), 'sync');
       const held = this.serverKeys.get(put.room);
       if (held && !held.has(put.key)) this.full.delete(put.room);
@@ -506,23 +585,32 @@ export class Sync<R, A = undefined> {
   }
 
   private pushable(put: Put): boolean {
-    if (this.dropped.has(put.room)) return false;
+    if (this.dropped.has(put.room) || this.gone.has(put.room)) return false;
     return !this.full.has(put.room) || !!this.serverKeys.get(put.room)?.has(put.key);
   }
 
   private missing(room: string, status: number): void {
     if (status === 400) { this.dropped.add(room); console.warn(`sync: room ${room} refused as malformed; left out of sync`); return; }
-    if (room !== this.local.store.account) return;
     const now = this.env.now();
+    if (room !== this.local.store.account) {
+      const since = this.sharedMissingAt.get(room);
+      if (since === undefined) this.sharedMissingAt.set(room, now);
+      else if (now - since >= LOST_GAP) this.gone.add(room);
+      return;
+    }
     if (this.accountMissingAt === null) this.accountMissingAt = now;
     else if (now - this.accountMissingAt >= LOST_GAP) this.lostAccount = true;
   }
 
-  /** The account room read is retired: this device moves to where its forwards lead, and joins the account there. */
+  /**
+   * The room read is retired: for the account room, this device moves to where its forwards lead and joins the account
+   * there; a shared room's records move to the room its forwards lead to.
+   */
   private async follow(room: string, remote: Snapshot): Promise<void> {
     const end = await this.forwardsFrom(room, remote);
     if (!end) return;
     if (end.room === room) { this.cycleHeads.add(room); return; }
+    if (room !== this.local.store.account) { this.local.edit((s, now) => followRoom(s, room, end.room, now), 'sync'); return; }
     const prev = this.local.store;
     this.local.edit((s, now) => joinAccount(this.m, switchAccount(s, end.room, now, this.m.salt).store, end.snapshot), 'sync');
     this.tellNews(prev, this.local.store);
@@ -663,9 +751,9 @@ export class Sync<R, A = undefined> {
     return c;
   }
 
-  /** A room holding a manifest or any of the app's keys. */
+  /** A room holding a manifest or any of the app's keys but shared records (a shared room holds only those). */
   private isAccountRoom(snap: Snapshot): boolean {
-    return ACCOUNT_KEY in snap || Object.keys(snap).some(k => kindOf(this.m, k) !== null);
+    return ACCOUNT_KEY in snap || Object.keys(snap).some(k => kindOf(this.m, k) !== null && !ownsRoom(this.m, k));
   }
 
   private async readAccount(room: string): Promise<{ room: string; snapshot: Snapshot }> {
@@ -674,6 +762,21 @@ export class Sync<R, A = undefined> {
     const end = await this.forwardsFrom(room, snap);
     if (!end) throw new SyncError('notfound');
     return end;
+  }
+
+  /** A shared room as it is now, past any forwards: the key of its record, and its scan. */
+  private async readShared(room: string): Promise<{ room: string; key: string; snapshot: Snapshot }> {
+    if (!isRoomId(room)) throw new SyncError('notfound');
+    const end = await this.forwardsFrom(room, await this.scanRoom(room));
+    const key = end && sharedKey(this.m, end.snapshot);
+    if (!end || !key) throw new SyncError('notfound');
+    return { ...end, key };
+  }
+
+  /** The shared record this device holds in a room. */
+  private byRoom(room: string): Shared<R> | null {
+    const s = this.local.store, key = Object.keys(s.shared).find(k => s.shared[k]!.val === room && s.records[k] !== undefined);
+    return key === undefined ? null : { key, room, record: s.records[key]! };
   }
 
   /** Keys of the room still to upload that the server can take now. */
@@ -741,6 +844,7 @@ export class Sync<R, A = undefined> {
       items, unsaved: c.unsaved,
       savedAt: this.savedAt, newer: this.newer || this.local.newer,
       retryAt: problem === 'rate' ? this.createBlockedUntil : null,
+      gone: Object.keys(s.shared).filter(k => this.gone.has(s.shared[k]!.val) && s.records[k] !== undefined).sort(),
     };
   }
 }

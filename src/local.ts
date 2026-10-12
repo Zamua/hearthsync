@@ -1,10 +1,10 @@
-import { accountFrom, isNewer } from './account.js';
+import { accountFrom, isNewer, sharedRegs } from './account.js';
 import { isRoomId } from './code.js';
 import { isStamp } from './crdt.js';
 import type { Fold, Model } from './model.js';
-import { docOf, homeKind, stampOf, versionOf } from './records.js';
+import { docOf, homeKind, ownsRoom, stampOf, versionOf } from './records.js';
 import { isObj, type Obj } from './repair.js';
-import { emptyStore, type LocalStore } from './store.js';
+import { emptyStore, sharedStamp, type LocalStore } from './store.js';
 
 // This device's store in localStorage: one key per record, so a save writes only what changed and two tabs rarely
 // clobber each other. Every change is written synchronously, before any network call, so a killed app loses nothing.
@@ -81,13 +81,14 @@ export function readStore<R, A>(st: Storage, m: Model<R, A>): LocalStore<R, A> |
     if (!isRoomId(room) || !isObj(keys)) continue;
     acks[room] = Object.fromEntries(Object.entries(keys).filter((e): e is [string, string] => typeof e[1] === 'string'));
   }
+  const shared = sharedRegs(meta.shared, k => ownsRoom(m, k));
   return {
     ...emptyStore<R, A>(appOf(m, meta)),
     account: isRoomId(meta.account) ? meta.account : null,
     profile: accountFrom(meta.profile),
     // The clock must pass every stamp held, whatever the meta says.
-    clock: Math.max(isStamp(meta.clock) ? meta.clock : 0, stampOf(m, records)),
-    records, acks,
+    clock: Math.max(isStamp(meta.clock) ? meta.clock : 0, stampOf(m, records), sharedStamp(shared)),
+    records, acks, shared,
     forwards: strings(meta.forwards, (k, v) => isRoomId(k) && isRoomId(v)),
     purge: Object.fromEntries(Object.entries(isObj(meta.purge) ? meta.purge : {}).filter((e): e is [string, number] => homeKind(m, e[0]) !== null && isStamp(e[1]))),
   };
@@ -138,7 +139,7 @@ export class Persist<R, A> {
   /** Each key with the object it holds (unchanged objects are skipped by identity) and its doc. */
   private entries(s: LocalStore<R, A>): Entry[] {
     const app = this.m.meta ? this.m.meta.write(s.app) : {};
-    const p = this.m.prefix, meta = { ...app, v: metaV(this.m), account: s.account, profile: s.profile, clock: s.clock, forwards: s.forwards, purge: s.purge };
+    const p = this.m.prefix, meta = { ...app, v: metaV(this.m), account: s.account, profile: s.profile, clock: s.clock, forwards: s.forwards, purge: s.purge, shared: s.shared };
     return [
       ...Object.entries(s.records).map(([key, r]): Entry => [p + storageName(key), r, () => docOf(this.m, key, r)]),
       [p + ACKS, s.acks, () => s.acks],

@@ -30,6 +30,8 @@ Others see only a **public id**: 64 bits of a salted hash of the room id, from w
 Linking a second device means typing or scanning the code. Merging two accounts moves one into the other and leaves a
 `forward` in the old room, which devices still on the old code follow.
 
+A record can also be shared with other accounts, in a room of its own whose id is the invite (see Shared rooms).
+
 ## How an app plugs in
 
 The app describes its records with a `Model`. Each record lives at its own room key (`note/<id>`, `slot/2`, `prefs`)
@@ -78,8 +80,9 @@ sync.on('news', ({ keys }) => { /* another device changed these records: re-read
 sync.on('status', st => { /* st.state, st.problem, st.code, st.items['list/groceries'] ('phone' | 'waiting' | 'saved' | 'failed') */ });
 ```
 
-The UI operations are `sync.peekCode(text)` (what a code holds), `sync.linkCode(text)`, `sync.mergeCode(text)` and
-`sync.remakeAccount()` (after the server lost the account room). Each fails with a `SyncError` whose `kind` says why:
+The UI operations are `sync.peekCode(text)` (what a code holds), `sync.linkCode(text)`, `sync.mergeCode(text)`,
+`sync.remakeAccount()` (after the server lost the account room), and for shared records `sync.share(key)`,
+`sync.peek(room)` and `sync.join(room)`. Each fails with a `SyncError` whose `kind` says why:
 `offline`, `code` (with the `CodeError`), `notfound`, `notaccount`, `same`, `noaccount`, `rate`, `full`, `failed`.
 
 ### Building blocks for records
@@ -117,6 +120,33 @@ device that finds a tombstone gone from the server (its ack was of that very doc
 it again, and a purged key comes back only if it was used after its tombstone. A kind's `cap` bounds how many records
 it keeps, tombstones counted: a new one first purges the oldest tombstone of its kind, and is refused (`'full'`) when
 there is none. A room answering `413` for a new key gives up its oldest tombstone and the PUT is tried once more.
+
+### Shared rooms
+
+A kind with `room: 'own'` marks records that can be shared with other accounts: a board friends pin things to, say.
+Such a record lives in a room of its own as well as in the account room, which keeps a copy of it and, under `shared`,
+which room it is in (a register per key: the last move wins). The room holds only that record's doc, so its id, the
+invite, gives nothing else of the account away.
+
+```ts
+const board: Kind<Board> = { ...boardFields, room: 'own' };
+
+const room = await sync.share('board/trip');   // made on the first share, everything uploaded; the same room after
+const { key, record } = await sync.peek(room);  // on a friend's device: the board as its room holds it
+await sync.join(room);                          // 'board/trip', merged in and synced with that room from now on
+```
+
+- **Every pass** reads each shared room of a live record after the account room, as rounds of their own: edits from
+  any member merge in as another device's would, and reach the account room on the next lap. Other devices of the
+  account find the room through the account room's `shared`.
+- **Peek** shows the room's record merged with this device's copy; offline, the copy alone. **Join** of a record this
+  device holds there works offline too.
+- **Not found** is what a join or peek of anything but a shared room gives: a malformed id (no request is sent), an
+  unknown or empty room, an account room, a room whose record is deleted. A new record past its kind's `cap` is `full`.
+- **A deleted record** reaches the room as a tombstone, so it is gone for every member; once there, the room leaves sync.
+- **A retired room** holds a `forward`, as an account room does: peeks and joins of an old invite land in the new
+  room, and members move their record there. A room answering `404` for `LOST_GAP` is listed in the status's `gone`;
+  sharing that record again makes a new room.
 
 ### Keys an earlier build wrote
 
@@ -181,8 +211,8 @@ sync. Every request gives up after 15 s as no connection.
 
 ## Local storage
 
-Under the model's `prefix`: `meta` (account, public id, clock, forwards owed, purged keys still to delete, and the
-app's own fields), `acks`
+Under the model's `prefix`: `meta` (account, public id, clock, forwards owed, purged keys still to delete, the rooms of
+shared records, and the app's own fields), `acks`
 (per room and key, the hash of the doc the server was last seen holding: the outbox is derived from these, there is no
 queue), and one key per record (its room key with each `/` as a `.`). A write storage refuses is not remembered as
 written, so the next one tries again. Storage written by a newer build (its meta's `v` above the model's
@@ -198,12 +228,12 @@ npm test
 
 The tests run devices against an in-memory rooms server (`hearthsync/testing`: `FakeRooms`, `TestClock`, `device`),
 which answers as the contract above does, can fail any request with any status, drop connections, stall requests and
-put an edge cache in front that keeps `404`s. Two example models stand in for apps: a notes app (one record per note,
-deleted as tombstones, with a fold of what it kept before sync and a room key an earlier build wrote) and a puzzle app
-(three save slots, each a playthrough). Alongside the scenario tests (first backup, linking, merging,
+put an edge cache in front that keeps `404`s. Three example models stand in for apps: a notes app (one record per note,
+deleted as tombstones, with a fold of what it kept before sync and a room key an earlier build wrote), a puzzle app
+(three save slots, each a playthrough) and a boards app (boards shared with friends, beside lists of the account's own). Alongside the scenario tests (first backup, linking, merging,
 forwards and cycles, clobbered writes, offline backlogs, every error status, restarts, two tabs) are property tests:
 every merge is checked for the CRDT laws over random inputs, and random histories across three devices (clobbered
-writes, scoped reads, new games) must converge with nothing lost and every register the last edit made. The code
+writes, scoped reads, new games, a board shared between two accounts) must converge with nothing lost and every register the last edit made. The code
 format is pinned by known-answer vectors, and SHA-256 against Web Crypto.
 
 `hearthsync/testing` is exported so an app can test its own model the same way.

@@ -98,12 +98,31 @@ its kind a `play(r)` returning `{ run, game }`. Then:
 - **Linking** (and following a forward) takes the account's record whole where it holds another playthrough; the
   device's own stays behind in the room it came from.
 - **Merging** another code in keeps this account's record where the other holds another playthrough.
+- A kind with `otherPlay: 'merge'` lets its own merge decide instead (say, the later run wins), so linking brings
+  every record along and none is set aside.
 - **A running session is refused once overtaken.** `putRecord(model, store, key, now, f, play)` returns
   `result: 'moved'` and changes nothing when the store now holds another playthrough at that key (linked in, followed
   in, or a new game begun on another device). Without the guard, a session of a higher run would win the merge again
   and bring its playthrough back over the one just joined. `moved(model, store, key, play)` asks the same question.
 
 Starting over writes the record with the next `run` directly (`editRecords`), which replaces it on every device.
+
+### Deleting, caps and the purge
+
+A kind whose records can be deleted gives `life(r)`: when the record was last used and when it was deleted. A deleted
+record stays as a tombstone (gone while `deleted > used`), so another device does not bring it back with older edits;
+a later use anywhere revives it. Tombstones show no chip and upload after live records. With the model's
+`purgeAfter`, tombstones that old are purged: dropped on the device and their keys deleted from the account room; a
+device that finds a tombstone gone from the server (its ack was of that very doc) drops it too rather than uploading
+it again, and a purged key comes back only if it was used after its tombstone. A kind's `cap` bounds how many records
+it keeps, tombstones counted: a new one first purges the oldest tombstone of its kind, and is refused (`'full'`) when
+there is none. A room answering `413` for a new key gives up its oldest tombstone and the PUT is tried once more.
+
+### Keys an earlier build wrote
+
+A kind with `home(r)` marks room keys an earlier build wrote (one save for the whole account, before there were
+several): a record read there merges in at its own key, the old key is never written, and it is read again only when
+it changed since it was last seen, so a record deleted since does not come back from it.
 
 ### Migrating what an app kept before sync
 
@@ -135,10 +154,11 @@ sync. Every request gives up after 15 s as no connection.
 
 ## Local storage
 
-Under the model's `prefix`: `meta` (account, public id, clock, forwards owed), `acks` (per room and key, the hash of
-the doc the server was last seen holding: the outbox is derived from these, there is no queue), and one key per record
-(its room key with each `/` as a `.`). A write storage refuses is not remembered as written, so the next one tries
-again. Storage written by a newer build (its meta's `v` above 2) is read but never written or folded over.
+Under the model's `prefix`: `meta` (account, public id, clock, forwards owed, purged keys still to delete), `acks`
+(per room and key, the hash of the doc the server was last seen holding: the outbox is derived from these, there is no
+queue), and one key per record (its room key with each `/` as a `.`). A write storage refuses is not remembered as
+written, so the next one tries again. Storage written by a newer build (its meta's `v` above the model's
+`storeVersion`, 2 by default) is read but never written or folded over.
 
 ## Tests
 
@@ -150,8 +170,9 @@ npm test
 
 The tests run devices against an in-memory rooms server (`hearthsync/testing`: `FakeRooms`, `TestClock`, `device`),
 which answers as the contract above does, can fail any request with any status, drop connections, stall requests and
-put an edge cache in front that keeps `404`s. Two example models stand in for apps: a notes app (one record per note)
-and a puzzle app (three save slots, each a playthrough). Alongside the scenario tests (first backup, linking, merging,
+put an edge cache in front that keeps `404`s. Two example models stand in for apps: a notes app (one record per note,
+deleted as tombstones, with a fold of what it kept before sync and a room key an earlier build wrote) and a puzzle app
+(three save slots, each a playthrough). Alongside the scenario tests (first backup, linking, merging,
 forwards and cycles, clobbered writes, offline backlogs, every error status, restarts, two tabs) are property tests:
 every merge is checked for the CRDT laws over random inputs, and random histories across three devices (clobbered
 writes, scoped reads, new games) must converge with nothing lost and every register the last edit made. The code

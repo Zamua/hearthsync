@@ -2,7 +2,7 @@ import { accountFrom, isNewer, sharedRegs } from './account.js';
 import { isRoomId } from './code.js';
 import { isStamp } from './crdt.js';
 import type { Fold, Model } from './model.js';
-import { docOf, homeKind, ownsRoom, stampOf, versionOf } from './records.js';
+import { docOf, homeKind, keepsRegister, ownsRoom, stampOf, versionOf } from './records.js';
 import { isObj, type Obj } from './repair.js';
 import { emptyStore, sharedStamp, type LocalStore } from './store.js';
 
@@ -81,7 +81,7 @@ export function readStore<R, A>(st: Storage, m: Model<R, A>): LocalStore<R, A> |
     if (!isRoomId(room) || !isObj(keys)) continue;
     acks[room] = Object.fromEntries(Object.entries(keys).filter((e): e is [string, string] => typeof e[1] === 'string'));
   }
-  const shared = sharedRegs(meta.shared, k => ownsRoom(m, k) && k in records);
+  const shared = sharedRegs(meta.shared, k => ownsRoom(m, k) && !keepsRegister(m, k) && k in records);
   return {
     ...emptyStore<R, A>(appOf(m, meta)),
     account: isRoomId(meta.account) ? meta.account : null,

@@ -1,4 +1,4 @@
-import type { Stamp } from './crdt.js';
+import type { Reg, Stamp } from './crdt.js';
 import type { LocalStore } from './store.js';
 
 /** A room's keys as read, each to its parsed JSON. */
@@ -54,6 +54,45 @@ export interface Kind<R> {
    * `Sync.join`). The account room still keeps it, and which room it is in. 'account' (the default): that room only.
    */
   room?: 'account' | 'own';
+  /**
+   * For a kind with `room: 'own'` and `life`: 'account' makes deleting the record this account leaving its room, which
+   * keeps the record for its other members; the tombstone never reaches it. 'room' (the default): the tombstone reaches
+   * the room, so the record is gone for every member.
+   */
+  deletes?: 'room' | 'account';
+  /**
+   * The record as joined from its room at stamp t: a use, so a record this account deleted (with `deletes: 'account'`)
+   * comes back. Without it, a join only merges.
+   */
+  enter?(r: R, t: Stamp): R;
+  /** How the record spreads over keys in its own room; the whole record at its own key when absent. */
+  layout?: RoomLayout<R>;
+  /**
+   * Keeps the register of the room a shared record lives in inside the record itself (an app whose records already
+   * carry one), instead of in the store's and the account room's `shared`. The kind's merge must merge it as a register,
+   * and its `from` keep a register holding LEFT if the app calls `Sync.leave`.
+   */
+  register?: { get(r: R): Reg<string> | undefined; set(r: R, reg: Reg<string>): R };
+}
+
+/**
+ * A shared record laid out over several keys of its room: one per field, one per entry added, so members writing at
+ * once never overwrite each other's keys. Fields the account keeps to itself are left out, and so is its tombstone:
+ * deleting is this account leaving (`deletes: 'account'`), and a deleted record still takes what it owes its room
+ * before it leaves sync. A layout's keys are never the app's own record keys, nor `forward`.
+ */
+export interface RoomLayout<R> {
+  /** The keys the room holds for the record, each with its doc, in the order to write them. */
+  docs(r: R): Record<string, unknown>;
+  /**
+   * The record the room's keys hold, for the record at key; null when they hold nothing of it. A read may be of some
+   * keys only, so it reads whatever is there; the result merges into this device's copy with the kind's merge.
+   */
+  read(snapshot: Snapshot, key: string): R | null;
+  /** Keys written once (an id, a creation time): any value the server holds counts as saved and is never written over. */
+  once?(key: string): boolean;
+  /** Whether a deleted record this device never uploaded to its room still owes it its keys; true by default. */
+  owes?(r: R): boolean;
 }
 
 /**
@@ -111,6 +150,11 @@ export interface Model<R, A = undefined> {
   kind(key: string): Kind<R> | null;
   /** The app's own state in the store's meta, on `LocalStore.app`. Without it, `app` is undefined. */
   meta?: AppMeta<A>;
+  /**
+   * The key of the shared record a room holds, for rooms laid out by a kind's `layout` (peek and join find the record
+   * through it); null when the room holds none. room is the room read, past any forwards.
+   */
+  roomKey?(snapshot: Snapshot, room: string): string | null;
   /** Migrations from storage written before sync, in order. */
   folds?: readonly Fold<R, A>[];
 }

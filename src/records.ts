@@ -1,5 +1,5 @@
 import { ACCOUNT_KEY, DOC, FORWARD_KEY, SHARED_KEY, isNewer } from './account.js';
-import { canon, type Stamp } from './crdt.js';
+import { canon, type Reg, type Stamp } from './crdt.js';
 import { samePlay, type Kind, type Model, type Snapshot } from './model.js';
 
 // The app's records, one per room key, read, written and merged through the model's kinds.
@@ -14,6 +14,15 @@ export const homeKind = <R>(m: Model<R, unknown>, key: string): Kind<R> | null =
 
 /** Whether the record at key can live in a room of its own. */
 export const ownsRoom = <R>(m: Model<R, unknown>, key: string): boolean => homeKind(m, key)?.room === 'own';
+
+/** Whether the record at key keeps its room register inside itself (`Kind.register`). */
+export const keepsRegister = <R>(m: Model<R, unknown>, key: string): boolean => ownsRoom(m, key) && !!homeKind(m, key)!.register;
+
+/** The room register a record keeps inside itself. */
+export const recordRoom = <R>(m: Model<R, unknown>, key: string, r: R): Reg<string> | undefined => homeKind(m, key)?.register?.get(r);
+
+/** Whether deleting the record at key is this account leaving its room (`Kind.deletes`). */
+export const leavesOnDelete = <R>(m: Model<R, unknown>, key: string): boolean => homeKind(m, key)?.deletes === 'account';
 
 export const versionOf = <R>(m: Model<R, unknown>): number => m.version ?? DOC;
 
@@ -62,6 +71,17 @@ export function recordsIn<R>(m: Model<R, unknown>, snap: Snapshot): Records<R> {
     out[home] = had === undefined ? r : hk.merge(had, r);
   }
   return out;
+}
+
+/** A shared room's snapshot without the docs this build must leave alone: a newer build's, and the forward. */
+export function roomRead<R>(m: Model<R, unknown>, snap: Snapshot): Snapshot {
+  return Object.fromEntries(Object.entries(snap).filter(([k, v]) => k !== FORWARD_KEY && !isNewer(v, versionOf(m))));
+}
+
+/** The record at key as a shared room holds it, by its kind's layout or whole at its key; null when it holds none. */
+export function roomRecord<R>(m: Model<R, unknown>, snap: Snapshot, key: string): R | null {
+  const layout = homeKind(m, key)?.layout;
+  return layout ? layout.read(roomRead(m, snap), key) : recordsIn(m, snap)[key] ?? null;
 }
 
 /**

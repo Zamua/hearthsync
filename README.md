@@ -83,7 +83,7 @@ sync.on('status', st => { /* st.state, st.problem, st.code, st.items['list/groce
 
 The UI operations are `sync.peekCode(text)` (what a code holds), `sync.linkCode(text)`, `sync.mergeCode(text)`,
 `sync.remakeAccount()` (after the server lost the account room), and for shared records `sync.share(key)`,
-`sync.peek(room)` and `sync.join(room)`. Each fails with a `SyncError` whose `kind` says why:
+`sync.peek(room)`, `sync.join(room)` and `sync.leave(key)`. Each fails with a `SyncError` whose `kind` says why:
 `offline`, `code` (with the `CodeError`), `notfound`, `notaccount`, `same`, `noaccount`, `rate`, `full`, `failed`.
 
 ### Building blocks for records
@@ -144,15 +144,60 @@ await sync.join(room);                          // 'board/trip', merged in and s
   device holds there works offline too.
 - **Not found** is what a join or peek of anything but a shared room gives: a malformed id (no request is sent), an
   unknown or empty room, an account room, a room whose record is deleted. A new record past its kind's `cap` is `full`.
-- **A deleted record** reaches the room as a tombstone, so it is gone for every member; once there, the room leaves
-  sync.
+- **A deleted record** reaches the room as a tombstone, so it is gone for every member (unless deleting is leaving,
+  below); once there, the room leaves sync.
   Purging the tombstone drops its entry in `shared` too, on every device of the account.
 - **Two devices of one account sharing a record at once** each make a room; the later share wins on both (the
   register's rule), and the device whose room lost writes a `forward` from it to the winner, so members who joined
   the losing room follow.
+- **Leaving** (`sync.leave(key)`, offline too) stops sharing a record without deleting it: it stays, live, in the
+  account room alone, its register holding `LEFT` (`''`), and the room carries on for its other members. Online, what
+  this device owes the room is uploaded first. Sharing it again makes a new room; joining the old one moves it back.
+- **Deleting as leaving**: a kind with `deletes: 'account'` makes a tombstone this account's alone. It never reaches
+  the room, which keeps the record for the others, and the room leaves sync. Give such a kind `enter(r, t)`, the record
+  as joined at stamp t, so joining the room again brings it back.
 - **A retired room** holds a `forward`, as an account room does: peeks and joins of an old invite land in the new
   room, and members move their record there. A room answering `404` for `LOST_GAP` is listed in the status's `gone`;
   sharing that record again makes a new room.
+
+### Laying a shared record out over its room
+
+By default a shared record sits whole at its own key in its room, so two members saving at once each PUT the whole doc,
+and the later one waits for the next round to merge the other's back in. A kind's `layout` spreads the record over
+several keys instead: one per field, one per entry members add, so concurrent writes land on different keys and none
+is overwritten. The layout also leaves out what the account keeps to itself, so it never reaches the other members.
+
+```ts
+const cork: Kind<Cork> = {
+  ...corkFields, room: 'own', deletes: 'account', enter: (r, t) => ({ ...r, u: t }),
+  layout: {
+    docs: r => ({ id: { v: 1, id: r.id }, title: { v: 1, title: r.title }, ...pinDocs(r.pins) }),  // pin/<id> each
+    read: (snapshot, key) => corkFromKeys(snapshot, key),  // whatever keys are there; null for none of its own
+    once: key => key === 'id',        // written once: any value there counts as saved, never written over
+    owes: r => r.u > 0,               // a record deleted before any use here owes its room nothing
+  },
+  register: { get: r => r.room, set: (r, room) => ({ ...r, room }) },  // optional: the room register in the record
+};
+const model: Model<Cork> = { /* ... */ roomKey: snapshot => (isObj(snapshot.id) ? `cork/${snapshot.id.id}` : null) };
+```
+
+- **`read`** gets the room's keys (all of them on a scan, some on a light read) without `forward` and a newer build's
+  docs; what it returns merges into this device's copy with the kind's `merge`. A layout's keys are never the app's own
+  record keys.
+- **`roomKey(snapshot, room)`** on the model finds the record a laid out room holds, for `peek` and `join`.
+- **A deleted laid out record** keeps the projection's keys (the tombstone is the account's own): its room still takes
+  what the device owes it, then leaves sync.
+- **`register`** keeps the room's register in the record instead of the store's and the account room's `shared`, for
+  an app whose records already carry one; the kind's `merge` must merge it as a register (`lwwOpt`).
+- **Chips**: a laid out record is `saved` only once its keys are in its room too (unless that room is gone).
+
+### Live copies of rooms, and holding the account room
+
+An app that already keeps a live copy of a shared room (a socket's) hands it over with `sync.attach(room, feed)`
+(`{ ready, kv }`; it returns the detach): while ready, rounds read it in place of scanning the room, and `sync.fed(room)`
+after it changes plans against it shortly, a burst once. `sync.hold(true)` makes passes leave the account room for
+later while shared rooms still sync (a realtime session that should not wait on uploads); `sync.hold(false)` runs what
+waited.
 
 ### Keys an earlier build wrote
 
@@ -234,12 +279,13 @@ npm test
 
 The tests run devices against an in-memory rooms server (`hearthsync/testing`: `FakeRooms`, `TestClock`, `device`),
 which answers as the contract above does, can fail any request with any status, drop connections, stall requests and
-put an edge cache in front that keeps `404`s. Three example models stand in for apps: a notes app (one record per note,
+put an edge cache in front that keeps `404`s. Four example models stand in for apps: a notes app (one record per note,
 deleted as tombstones, with a fold of what it kept before sync and a room key an earlier build wrote), a puzzle app
-(three save slots, each a playthrough) and a boards app (boards shared with friends, beside lists of the account's own). Alongside the scenario tests (first backup, linking, merging,
+(three save slots, each a playthrough), a boards app (boards shared with friends, beside lists of the account's own) and a corkboards app (shared boards laid out
+one key per field and per pin, the account's starred pins kept to itself). Alongside the scenario tests (first backup, linking, merging,
 forwards and cycles, clobbered writes, offline backlogs, every error status, restarts, two tabs) are property tests:
 every merge is checked for the CRDT laws over random inputs, and random histories across three devices (clobbered
-writes, scoped reads, new games, a board shared between two accounts) must converge with nothing lost and every register the last edit made. The code
+writes, scoped reads, new games, a board and a laid out corkboard shared between two accounts) must converge with nothing lost and every register the last edit made. The code
 format is pinned by known-answer vectors, and SHA-256 against Web Crypto.
 
 `hearthsync/testing` is exported so an app can test its own model the same way.

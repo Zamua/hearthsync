@@ -1,13 +1,15 @@
-import { UNTIMED, gsetAdd, gsetList, gsetMerge, hash, isStamp, lww, tick, type GSet, type Reg, type Stamp } from '../src/crdt.js';
+import { UNTIMED, gsetAdd, gsetList, gsetMerge, hash, isStamp, lww, lwwOpt, tick, type GSet, type Reg, type Stamp } from '../src/crdt.js';
 import { playOrder, samePlay, type AppMeta, type Fold, type Kind, type Model, type Playthrough } from '../src/model.js';
-import { gsetFrom, isObj, regFrom } from '../src/repair.js';
+import { gsetFrom, isMember, isObj, regFrom } from '../src/repair.js';
+import { isRoomId } from '../src/code.js';
 import { importRecords, putRecord, type LocalStore, type PutResult } from '../src/store.js';
 import type { Records } from '../src/records.js';
 
-// Three example apps for the tests. Notes: one record per note, merged field by field and deleted as a tombstone, with a
+// Four example apps for the tests. Notes: one record per note, merged field by field and deleted as a tombstone, with a
 // fold of the list it kept before sync and the one note an earlier build pinned in the room; a variant also keeps the
 // notes opened on this device in the store's meta. Puzzles: three save slots, each a playthrough that never mixes with
-// another. Boards: each shared with friends in a room of its own, beside lists the account keeps to itself.
+// another. Boards: each shared with friends in a room of its own, beside lists the account keeps to itself. Corkboards:
+// shared like boards, but laid out in their room one key per field and per pin.
 
 const isText = (x: unknown): x is string => typeof x === 'string' && x.length <= 2000;
 const isCount = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0 && x <= 1_000_000;
@@ -230,3 +232,89 @@ export function deleteBoard(s: LocalStore<Board>, key: string, now: number): Loc
 export function boardsOf(s: { records: Records<Board> }): Record<string, { title: string; pins: string[] }> {
   return Object.fromEntries(Object.entries(s.records).filter(([, b]) => b.deleted <= b.u).map(([k, b]) => [k, { title: b.title.val, pins: gsetList(b.pins) }]));
 }
+
+/** Boards whose deleting is leaving: a member's delete keeps the board for the others. */
+export const leavingBoardKind: Kind<Board> = { ...boardKind, deletes: 'account', enter: (r, t) => ({ ...r, u: t }) };
+export const leavingBoards: Model<Board> = { ...boards, prefix: 'leaving.v1.', kind: key => (boards.kind(key) === boardKind ? leavingBoardKind : boards.kind(key)) };
+
+// Corkboards.
+
+/**
+ * A corkboard: its room register kept in the record, a title, when it was made, and pins, each a key of its own in its
+ * room so members pinning at once never overwrite each other. Starred pins and when it was used and left are the
+ * account's own, never in the room. Deleting (left > u) is this account leaving.
+ */
+export interface Cork { id: string; room?: Reg<string>; title: Reg<string>; made: Stamp; u: Stamp; left: Stamp; pins: GSet; starred: GSet }
+
+const CORK = /^cork\/([0-9a-z-]{1,40})$/;
+export const corkKey = (id: string): string => `cork/${id}`;
+
+const blankCork = (id: string): Cork => ({ id, title: { val: '', t: 0 }, made: 0, u: 0, left: 0, pins: {}, starred: {} });
+const earliest = (a: Stamp, b: Stamp): Stamp => (a === 0 ? b : b === 0 ? a : Math.min(a, b));
+
+export const corkKind: Kind<Cork> = {
+  from(raw, key) {
+    const id = CORK.exec(key)?.[1];
+    if (!id || !isObj(raw) || raw.id !== id) return null;
+    const room = regFrom(raw.room, isRoomId), st = (x: unknown) => (isStamp(x) ? x : 0);
+    return { id, ...(room ? { room } : {}), title: regFrom(raw.title, isText) ?? { val: '', t: 0 }, made: st(raw.made), u: st(raw.u), left: st(raw.left), pins: gsetFrom(raw.pins), starred: gsetFrom(raw.starred) };
+  },
+  merge(a, b) {
+    const room = lwwOpt(a.room, b.room);
+    return {
+      id: a.id, ...(room ? { room } : {}), title: lww(a.title, b.title), made: earliest(a.made, b.made), u: Math.max(a.u, b.u), left: Math.max(a.left, b.left),
+      pins: gsetMerge(a.pins, b.pins), starred: gsetMerge(a.starred, b.starred),
+    };
+  },
+  stamp: r => Math.max(r.title.t, r.made, r.u, r.left, r.room?.t ?? 0, ...Object.values(r.pins), ...Object.values(r.starred)),
+  life: r => ({ used: r.u, deleted: r.left }),
+  room: 'own',
+  deletes: 'account',
+  cap: 4,
+  enter: (r, t) => ({ ...r, u: t }),
+  register: { get: r => r.room, set: (r, room) => ({ ...r, room }) },
+  layout: {
+    docs(r) {
+      const out: Record<string, unknown> = { id: { v: 1, id: r.id }, title: { v: 1, title: r.title } };
+      if (r.made) out.made = { v: 1, at: r.made };
+      for (const [p, at] of Object.entries(r.pins)) out[`pin/${p}`] = { v: 1, at };
+      return out;
+    },
+    read(snap, key) {
+      const id = CORK.exec(key)?.[1];
+      if (!id || !Object.keys(snap).some(k => k === 'id' || k === 'title' || k === 'made' || k.startsWith('pin/'))) return null;
+      const r = blankCork(id), title = isObj(snap.title) ? regFrom(snap.title.title, isText) : null;
+      if (title) r.title = title;
+      if (isObj(snap.made) && isStamp(snap.made.at)) r.made = snap.made.at;
+      const pins: Record<string, Stamp> = {};
+      for (const [k, v] of Object.entries(snap)) if (k.startsWith('pin/') && isMember(k.slice(4)) && isObj(v) && isStamp(v.at)) pins[k.slice(4)] = v.at;
+      r.pins = gsetMerge({}, pins);
+      return r;
+    },
+    once: key => key === 'id' || key === 'made',
+    owes: r => r.u > 0,
+  },
+};
+
+export const corks: Model<Cork> = {
+  prefix: 'corks.v1.',
+  salt: 'corks/public/',
+  kind: key => (CORK.test(key) ? corkKind : null),
+  roomKey: snap => (isObj(snap.id) && typeof snap.id.id === 'string' && isId(snap.id.id) ? corkKey(snap.id.id) : null),
+};
+
+/** A save of a corkboard: made if new, its title, a pin added, a pin starred. Used now either way. */
+export function editCork(s: LocalStore<Cork>, id: string, now: number, o: { title?: string; pin?: string; star?: string } = {}): LocalStore<Cork> {
+  return putRecord(corks, s, corkKey(id), now, (held, t) => {
+    const base = held ?? { ...blankCork(id), made: t };
+    const title = o.title === undefined || base.title.val === o.title ? base.title : { val: o.title, t };
+    return { ...base, title, u: t, pins: o.pin ? gsetAdd(base.pins, [o.pin], t) : base.pins, starred: o.star ? gsetAdd(base.starred, [o.star], t) : base.starred };
+  }).store;
+}
+
+/** This account leaves the corkboard: a tombstone of its own, the room left to the others. */
+export function leaveCork(s: LocalStore<Cork>, id: string, now: number): LocalStore<Cork> {
+  return putRecord(corks, s, corkKey(id), now, (held, t) => ({ ...held!, left: t })).store;
+}
+
+export const pinsOf = (s: LocalStore<Cork>, id: string): string[] => Object.keys(s.records[corkKey(id)]?.pins ?? {}).sort();

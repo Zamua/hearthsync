@@ -1,9 +1,9 @@
-import { ACCOUNT_KEY, type AccountDoc } from './account.js';
+import { ACCOUNT_KEY, LEFT, type AccountDoc } from './account.js';
 import { isRoomId } from './code.js';
-import { UNTIMED, canon, regsMerge, tick, type Regs, type Stamp } from './crdt.js';
+import { UNTIMED, canon, regsMerge, tick, type Reg, type Regs, type Stamp } from './crdt.js';
 import { publicId } from './identity.js';
 import { samePlay, type Kind, type Model, type Playthrough, type Snapshot } from './model.js';
-import { homeKind, isLive, kindOf, mergeRecords, ownsRoom, recordsIn, stampOf, tombstoneOf, type Records } from './records.js';
+import { homeKind, isLive, keepsRegister, kindOf, mergeRecords, ownsRoom, recordRoom, recordsIn, roomRecord, stampOf, tombstoneOf, type Records } from './records.js';
 
 // This device's copy of the account: the only thing the app reads, written before any network call. Every edit takes
 // the wall clock (plus server skew) and stamps through the store's clock.
@@ -170,52 +170,92 @@ export function forwardDone<R, A>(s: LocalStore<R, A>, from: string): LocalStore
   return { ...s, forwards };
 }
 
-/** Keys moved to a room at the next stamp; s itself when none moves. */
-function moveTo<R, A>(s: LocalStore<R, A>, keys: readonly string[], room: string, now: number): LocalStore<R, A> {
-  const move = keys.filter(k => s.shared[k]?.val !== room);
-  if (!move.length || !isRoomId(room)) return s;
-  const t = tick(s.clock, now);
-  return { ...s, clock: t, shared: regsMerge(s.shared, Object.fromEntries(move.map(k => [k, { val: room, t }]))) };
+/**
+ * Every shared record's room register, by key: the store's `shared`, and those kept inside records (`Kind.register`).
+ * A register holding LEFT is a record this account stopped sharing.
+ */
+export function placed<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Regs<string> {
+  let out: Record<string, Reg<string>> | null = null;
+  for (const [key, r] of Object.entries(s.records)) {
+    const reg = keepsRegister(m, key) ? recordRoom(m, key, r) : undefined;
+    if (reg) (out ??= { ...s.shared })[key] = reg;
+  }
+  return out ?? s.shared;
+}
+
+/** The room the record at key syncs with: none when it is not shared, or this account left it. */
+export function roomOf<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string): string | null {
+  const r = s.records[key];
+  if (r === undefined || !ownsRoom(m, key)) return null;
+  const reg = keepsRegister(m, key) ? recordRoom(m, key, r) : s.shared[key];
+  return reg && reg.val !== LEFT ? reg.val : null;
+}
+
+/** Keys moved to a room (or LEFT) at the next stamp; s itself when none moves. */
+function moveTo<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, keys: readonly string[], room: string, now: number): LocalStore<R, A> {
+  const at = placed(m, s), move = keys.filter(k => at[k]?.val !== room);
+  if (!move.length || (room !== LEFT && !isRoomId(room))) return s;
+  const t = tick(s.clock, now), reg = { val: room, t }, records: Record<string, R> = { ...s.records }, shared: Record<string, Reg<string>> = {};
+  for (const k of move) {
+    const r = records[k];
+    if (keepsRegister(m, k)) { if (r !== undefined) records[k] = homeKind(m, k)!.register!.set(r, reg); } else shared[k] = reg;
+  }
+  return { ...s, clock: t, records, shared: Object.keys(shared).length ? regsMerge(s.shared, shared) : s.shared };
 }
 
 /** The record at key lives in this room now (just made by POST). */
 export const shareRecord = <R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string, room: string, now: number): LocalStore<R, A> =>
-  ownsRoom(m, key) && s.records[key] !== undefined ? moveTo(s, [key], room, now) : s;
+  ownsRoom(m, key) && s.records[key] !== undefined ? moveTo(m, s, [key], room, now) : s;
 
-/** Records of a retired room move to the room it forwards to. */
-export const followRoom = <R, A>(s: LocalStore<R, A>, from: string, to: string, now: number): LocalStore<R, A> =>
-  moveTo(s, Object.keys(s.shared).filter(k => s.shared[k]!.val === from), to, now);
+/**
+ * This account stops sharing the record at key: it stays, live, in the account room alone, and its room is left to
+ * its other members. Sharing it again makes a new room; joining the old one again moves it back.
+ */
+export const leaveRoom = <R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string, now: number): LocalStore<R, A> =>
+  roomOf(m, s, key) === null ? s : moveTo(m, s, [key], LEFT, now);
+
+/** Records of a retired room move to the room it forwards to; registers kept in records too, given the model. */
+export function followRoom<R, A>(s: LocalStore<R, A>, from: string, to: string, now: number, m: Model<R, unknown> = { prefix: '', salt: '', kind: () => null }): LocalStore<R, A> {
+  const at = placed(m, s);
+  return moveTo(m, s, Object.keys(at).filter(k => at[k]!.val === from), to, now);
+}
 
 /**
  * The live shared record a room holds: its key (the smallest, should it hold several); null for none, and for an
- * account room, which holds a manifest or records of the account's own.
+ * account room, which holds a manifest or records of the account's own. A room laid out by a kind's layout is found
+ * through the model's roomKey.
  */
-export function sharedKey<R>(m: Model<R, unknown>, snapshot: Snapshot): string | null {
-  if (ACCOUNT_KEY in snapshot || Object.keys(snapshot).some(k => kindOf(m, k) !== null && !ownsRoom(m, k))) return null;
+export function sharedKey<R>(m: Model<R, unknown>, snapshot: Snapshot, room?: string): string | null {
+  if (ACCOUNT_KEY in snapshot) return null;
+  const laid = room !== undefined ? m.roomKey?.(snapshot, room) ?? null : null;
+  if (laid !== null) {
+    const k = homeKind(m, laid), r = k?.layout && k.room === 'own' ? roomRecord(m, snapshot, laid) : null;
+    if (r !== null && isLive(m, laid, r)) return laid;
+  }
+  if (Object.keys(snapshot).some(k => kindOf(m, k) !== null && !ownsRoom(m, k))) return null;
   const records = recordsIn(m, snapshot);
-  return Object.keys(records).filter(k => ownsRoom(m, k) && isLive(m, k, records[k]!)).sort()[0] ?? null;
+  return Object.keys(records).filter(k => ownsRoom(m, k) && !homeKind(m, k)!.layout && isLive(m, k, records[k]!)).sort()[0] ?? null;
 }
 
 /**
  * Joining a shared record from its room (an invite): the room's copy merges in as another device's edit would, and the
- * record syncs with that room from now on. A key this device purged comes back. none: the room holds no live shared
- * record; full: a new record past its kind's cap, with no tombstone to make way.
+ * record syncs with that room from now on. A key this device purged comes back, and a kind's `enter` marks the use.
+ * none: the room holds no live shared record; full: a new record past its kind's cap, with no tombstone to make way.
  */
 export function joinRoom<R, A>(
   m: Model<R, unknown>, s: LocalStore<R, A>, room: string, snapshot: Snapshot, now: number,
 ): { store: LocalStore<R, A>; key: string } | 'none' | 'full' {
-  const key = sharedKey(m, snapshot);
+  const key = sharedKey(m, snapshot, room);
   if (key === null || !isRoomId(room)) return 'none';
   let base = purgeDone(s, key);
-  if (!(key in s.records)) {
-    const k = homeKind(m, key)!;
-    if (k.cap !== undefined && count(m, s, k) >= k.cap) {
-      const drop = oldestTombstone(m, s, x => kindOf(m, x) === k);
-      if (!drop) return 'full';
-      base = purgeRecord(m, base, drop);
-    }
+  const k = homeKind(m, key)!;
+  if (!(key in s.records) && k.cap !== undefined && count(m, s, k) >= k.cap) {
+    const drop = oldestTombstone(m, s, x => kindOf(m, x) === k);
+    if (!drop) return 'full';
+    base = purgeRecord(m, base, drop);
   }
-  const records = mergeRecords(m, base.records, { [key]: recordsIn(m, snapshot)[key]! });
+  let records = mergeRecords(m, base.records, { [key]: roomRecord(m, snapshot, key)! });
+  if (k.enter) records = { ...records, [key]: k.enter(records[key]!, tick(Math.max(base.clock, stampOf(m, records)), now)) };
   base = { ...base, clock: Math.max(base.clock, stampOf(m, records)), records };
-  return { store: moveTo(base, [key], room, now), key };
+  return { store: moveTo(m, base, [key], room, now), key };
 }

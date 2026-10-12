@@ -55,7 +55,7 @@ export interface Kind<R> {
  * A migration from what an app kept before sync: folded in at boot, and again whenever another tab (an older build)
  * writes one of its keys. Marked done only once the store it made reads back from storage.
  */
-export interface Fold<R> {
+export interface Fold<R, A = undefined> {
   /** Its record of what the last fold took: a name under the prefix. */
   mark: string;
   /** Whether a storage key (whole, any prefix) is one it reads. */
@@ -65,11 +65,24 @@ export interface Fold<R> {
    * hold what that mark recorded), merged into s, with the mark to record; null when nothing changed. It only adds, so
    * what a killed fold or another tab wrote is merged, never dropped.
    */
-  fold(s: LocalStore<R>, get: (key: string) => string | null, last: string | null, now: number): { store: LocalStore<R>; mark: string } | null;
+  fold(s: LocalStore<R, A>, get: (key: string) => string | null, last: string | null, now: number): { store: LocalStore<R, A>; mark: string } | null;
 }
 
-/** What an app plugs in: its names and its kinds of record. R is the type of its records. */
-export interface Model<R> {
+/**
+ * Small state of the app's own kept on this device beside its records (items seen, the last one used), stored in the
+ * meta key with the library's fields, so it is written in the same write. It is not synced.
+ */
+export interface AppMeta<A> {
+  /** The app's state from the meta as storage holds it (`{}` when there is none). Unchecked: repair it. */
+  read(meta: Readonly<Record<string, unknown>>): A;
+  /** The fields to keep in the meta. The library's own (`v`, `account`, `profile`, `clock`, `forwards`, `purge`) win. */
+  write(app: A): Record<string, unknown>;
+  /** This tab's state and the one another tab wrote since, as the store holds them next. Without it, the other tab's wins. */
+  merge?(mine: A, theirs: A): A;
+}
+
+/** What an app plugs in: its names and its kinds of record. R is the type of its records, A of its meta state. */
+export interface Model<R, A = undefined> {
   /** Every key the local store writes starts with this ('notes.v2.'). `meta` and `acks` under it are the library's. */
   prefix: string;
   /** Hashed with the account room id into the public id ('notes/public/'). Fixed for good once accounts exist. */
@@ -88,6 +101,8 @@ export interface Model<R> {
    * under its key with each `/` as a `.`.
    */
   kind(key: string): Kind<R> | null;
+  /** The app's own state in the store's meta, on `LocalStore.app`. Without it, `app` is undefined. */
+  meta?: AppMeta<A>;
   /** Migrations from storage written before sync, in order. */
-  folds?: readonly Fold<R>[];
+  folds?: readonly Fold<R, A>[];
 }

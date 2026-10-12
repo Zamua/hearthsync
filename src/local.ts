@@ -38,7 +38,10 @@ export function browserStorage(): Storage {
 /** The meta's format by default, and the oldest this reads: one above the model's is a newer build's. */
 const META_V = 2;
 const META = 'meta', ACKS = 'acks';
-const metaV = <R>(m: Model<R>): number => m.storeVersion ?? META_V;
+const metaV = <R>(m: Model<R, unknown>): number => m.storeVersion ?? META_V;
+
+/** The app's state from a meta (`{}` when there is none); undefined for a model without a meta hook. */
+const appOf = <R, A>(m: Model<R, A>, meta: Readonly<Record<string, unknown>>): A => (m.meta ? m.meta.read(meta) : undefined as A);
 
 /** A record's name in storage: its room key with each `/` as a `.`. */
 export const storageName = (key: string): string => key.replace(/\//g, '.');
@@ -52,14 +55,15 @@ const strings = (raw: unknown, ok: (k: string, v: string) => boolean): Record<st
 const metaVersion = (raw: unknown): number | null => (isObj(raw) && typeof raw.v === 'number' ? raw.v : null);
 
 /** Whether a newer build wrote this storage's meta: this build reads what it can of it and never writes over it. */
-export const newerStore = <R>(st: Storage, m: Model<R>): boolean => (metaVersion(parse(st.get(m.prefix + META))) ?? 0) > metaV(m);
+export const newerStore = <R>(st: Storage, m: Model<R, unknown>): boolean => (metaVersion(parse(st.get(m.prefix + META))) ?? 0) > metaV(m);
 
 /**
  * The store, or null when this device has none yet. Records are read even without a meta (a write cut short, or
  * storage that filled up): each stands alone, and a missing meta only means no account yet. A newer build's meta is
- * read like this one's, its fields checked the same way; a newer build's records are left out.
+ * read like this one's, its fields checked the same way (the app's by its own read); a newer build's records are left
+ * out.
  */
-export function readStore<R>(st: Storage, m: Model<R>): LocalStore<R> | null {
+export function readStore<R, A>(st: Storage, m: Model<R, A>): LocalStore<R, A> | null {
   const raw = parse(st.get(m.prefix + META));
   if (raw !== null && (metaVersion(raw) ?? 0) < META_V) return null;
   const meta: Obj = isObj(raw) ? raw : {}, skip = new Set([META, ACKS, ...(m.folds ?? []).map(f => f.mark)]);
@@ -78,7 +82,7 @@ export function readStore<R>(st: Storage, m: Model<R>): LocalStore<R> | null {
     acks[room] = Object.fromEntries(Object.entries(keys).filter((e): e is [string, string] => typeof e[1] === 'string'));
   }
   return {
-    ...emptyStore<R>(),
+    ...emptyStore<R, A>(appOf(m, meta)),
     account: isRoomId(meta.account) ? meta.account : null,
     profile: accountFrom(meta.profile),
     // The clock must pass every stamp held, whatever the meta says.
@@ -95,9 +99,9 @@ type Entry = [key: string, obj: unknown, doc: () => unknown];
  * Writes what changed since the last write: records by identity first, then by their text. A record it wrote that has
  * left the store has its key removed, or the next boot would read it back and upload it again.
  */
-export class Persist<R> {
+export class Persist<R, A> {
   private written = new Map<string, { obj: unknown; json: string }>();
-  constructor(private st: Storage, private m: Model<R>) {}
+  constructor(private st: Storage, private m: Model<R, A>) {}
 
   /** Forget what was written: storage may have been changed by another tab. */
   reset(): void { this.written.clear(); }
@@ -108,7 +112,7 @@ export class Persist<R> {
   }
 
   /** The meta goes last, so a meta read back means the records before it were written, and dropped ones removed. */
-  write(s: LocalStore<R>): void {
+  write(s: LocalStore<R, A>): void {
     const entries = this.entries(s), held = new Set(entries.map(([key]) => key));
     for (const [key, obj, doc] of entries) {
       if (key === this.m.prefix + ACKS) this.drop(held);
@@ -117,7 +121,7 @@ export class Persist<R> {
   }
 
   /** Whether storage holds all of s as write() would put it, and none of the records it wrote that s no longer has. */
-  verify(s: LocalStore<R>): boolean {
+  verify(s: LocalStore<R, A>): boolean {
     const entries = this.entries(s), held = new Set(entries.map(([key]) => key));
     return entries.every(([key, , doc]) => this.st.get(key) === JSON.stringify(doc())) && [...this.written.keys()].every(k => held.has(k) || this.st.get(k) === null);
   }
@@ -132,8 +136,9 @@ export class Persist<R> {
   }
 
   /** Each key with the object it holds (unchanged objects are skipped by identity) and its doc. */
-  private entries(s: LocalStore<R>): Entry[] {
-    const p = this.m.prefix, meta = { v: metaV(this.m), account: s.account, profile: s.profile, clock: s.clock, forwards: s.forwards, purge: s.purge };
+  private entries(s: LocalStore<R, A>): Entry[] {
+    const app = this.m.meta ? this.m.meta.write(s.app) : {};
+    const p = this.m.prefix, meta = { ...app, v: metaV(this.m), account: s.account, profile: s.profile, clock: s.clock, forwards: s.forwards, purge: s.purge };
     return [
       ...Object.entries(s.records).map(([key, r]): Entry => [p + storageName(key), r, () => docOf(this.m, key, r)]),
       [p + ACKS, s.acks, () => s.acks],
@@ -155,7 +160,7 @@ export class Persist<R> {
  * until a fold is marked done, the next boot folds again from them, merging whatever an earlier try or another tab
  * wrote. trusted: a store was found, so its mark means something. Null when nothing changed.
  */
-function foldInto<R>(st: Storage, m: Model<R>, f: Fold<R>, s: LocalStore<R>, trusted: boolean, now: number): LocalStore<R> | null {
+function foldInto<R, A>(st: Storage, m: Model<R, A>, f: Fold<R, A>, s: LocalStore<R, A>, trusted: boolean, now: number): LocalStore<R, A> | null {
   const r = f.fold(s, k => st.get(k), trusted ? st.get(m.prefix + f.mark) : null, now);
   if (!r) return null;
   const p = new Persist(st, m);
@@ -168,10 +173,10 @@ function foldInto<R>(st: Storage, m: Model<R>, f: Fold<R>, s: LocalStore<R>, tru
  * The store at boot, with each fold run whose keys are there. Never over a newer build's store, which did its own
  * folds. moved: this first boot folded records in from before sync.
  */
-export function bootStore<R>(st: Storage, m: Model<R>, now: number): { store: LocalStore<R>; moved: boolean } {
+export function bootStore<R, A>(st: Storage, m: Model<R, A>, now: number): { store: LocalStore<R, A>; moved: boolean } {
   const found = readStore(st, m), first = st.get(m.prefix + META) === null;
-  if (newerStore(st, m)) return { store: found ?? emptyStore(), moved: false };
-  let store = found ?? emptyStore<R>(), moved = false;
+  if (newerStore(st, m)) return { store: found ?? emptyStore(appOf(m, {})), moved: false };
+  let store = found ?? emptyStore<R, A>(appOf(m, {})), moved = false;
   for (const f of m.folds ?? []) {
     if (!st.keys().some(k => f.reads(k))) continue;
     store = foldInto(st, m, f, store, found !== null, now) ?? store;
@@ -182,23 +187,23 @@ export function bootStore<R>(st: Storage, m: Model<R>, now: number): { store: Lo
 
 /** Where an edit came from: the app (a change to upload), sync (a merge or an ack), another tab (a reload). */
 export type Source = 'app' | 'sync' | 'reload';
-export type StoreListener<R> = (next: LocalStore<R>, prev: LocalStore<R>, source: Source) => void;
+export type StoreListener<R, A = undefined> = (next: LocalStore<R, A>, prev: LocalStore<R, A>, source: Source) => void;
 
 export interface LocalEnv { now(): number }
 
 /** The device's store in memory, mirrored to storage on every edit. */
-export class Local<R> {
-  store: LocalStore<R>;
+export class Local<R, A = undefined> {
+  store: LocalStore<R, A>;
   /** This boot folded records in from before sync, for a notice. */
   readonly moved: boolean;
   /** A newer build wrote this device's storage: it is read, never written, and this session's edits live in memory. */
   readonly newer: boolean;
   /** The server's clock minus this device's, in ms. */
   skew = 0;
-  private persist: Persist<R>;
-  private subs = new Set<StoreListener<R>>();
+  private persist: Persist<R, A>;
+  private subs = new Set<StoreListener<R, A>>();
 
-  constructor(private st: Storage, readonly model: Model<R>, readonly env: LocalEnv = { now: () => Date.now() }) {
+  constructor(private st: Storage, readonly model: Model<R, A>, readonly env: LocalEnv = { now: () => Date.now() }) {
     const b = bootStore(st, model, env.now());
     this.store = b.store;
     this.moved = b.moved;
@@ -217,7 +222,7 @@ export class Local<R> {
     this.skew = Math.abs(off) > 2000 + (recvMs - sentMs) / 2 ? Math.round(off) : 0;
   }
 
-  edit(f: (s: LocalStore<R>, now: number) => LocalStore<R>, source: Source = 'app'): LocalStore<R> {
+  edit(f: (s: LocalStore<R, A>, now: number) => LocalStore<R, A>, source: Source = 'app'): LocalStore<R, A> {
     // Another tab may have written since this one last read (its storage event not yet handled): an edit on the older
     // copy would write that copy's meta and records back over it.
     this.reload();
@@ -229,18 +234,18 @@ export class Local<R> {
     return next;
   }
 
-  /** Storage changed under us (another tab): read it back. */
+  /** Storage changed under us (another tab): read it back, the app's meta state merged with this tab's if it can be. */
   reload(): void {
     if (!this.persist.stale()) return;
-    const next = readStore(this.st, this.model);
-    if (next) this.replace(next);
+    const next = readStore(this.st, this.model), merge = this.model.meta?.merge;
+    if (next) this.replace(merge ? { ...next, app: merge(this.store.app, next.app) } : next);
   }
 
   /** A key a fold reads changed (a tab of an older build still open, or a rollback): what changed folds in. */
   refold(): void {
     if (this.newer) return;
     this.reload();
-    let next: LocalStore<R> | null = null;
+    let next: LocalStore<R, A> | null = null;
     for (const f of this.model.folds ?? []) next = foldInto(this.st, this.model, f, next ?? this.store, true, this.now()) ?? next;
     if (next) this.replace(next);
   }
@@ -251,7 +256,7 @@ export class Local<R> {
   /** Whether a storage key is the store's own, written by another tab. */
   owns(key: string): boolean { return key.startsWith(this.model.prefix); }
 
-  private replace(next: LocalStore<R>): void {
+  private replace(next: LocalStore<R, A>): void {
     const prev = this.store;
     this.store = next;
     this.persist.reset();
@@ -259,5 +264,5 @@ export class Local<R> {
     for (const fn of this.subs) fn(next, prev, 'reload');
   }
 
-  on(fn: StoreListener<R>): () => void { this.subs.add(fn); return () => { this.subs.delete(fn); }; }
+  on(fn: StoreListener<R, A>): () => void { this.subs.add(fn); return () => { this.subs.delete(fn); }; }
 }

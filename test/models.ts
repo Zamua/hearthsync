@@ -1,12 +1,13 @@
 import { UNTIMED, gsetAdd, gsetList, gsetMerge, hash, isStamp, lww, tick, type GSet, type Reg, type Stamp } from '../src/crdt.js';
-import { playOrder, samePlay, type Fold, type Kind, type Model, type Playthrough } from '../src/model.js';
+import { playOrder, samePlay, type AppMeta, type Fold, type Kind, type Model, type Playthrough } from '../src/model.js';
 import { gsetFrom, isObj, regFrom } from '../src/repair.js';
 import { importRecords, putRecord, type LocalStore, type PutResult } from '../src/store.js';
 import type { Records } from '../src/records.js';
 
 // Two example apps for the tests. Notes: one record per note, merged field by field and deleted as a tombstone, with a
-// fold of the list it kept before sync and the one note an earlier build pinned in the room. Puzzles: three save
-// slots, each a playthrough that never mixes with another.
+// fold of the list it kept before sync and the one note an earlier build pinned in the room; a variant also keeps the
+// notes opened on this device in the store's meta. Puzzles: three save slots, each a playthrough that never mixes with
+// another.
 
 const isText = (x: unknown): x is string => typeof x === 'string' && x.length <= 2000;
 const isCount = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0 && x <= 1_000_000;
@@ -45,7 +46,7 @@ export const NOTES_V1 = 'notes.v1';
 export const V1_STAMP = UNTIMED;
 
 /** The v1 list folded in: on the first fold every text at V1_STAMP, later only texts changed since stamped now. */
-const v1Fold: Fold<Note> = {
+const v1Fold = <A>(): Fold<Note, A> => ({
   mark: 'v1',
   reads: key => key === NOTES_V1,
   fold(s, get, last, now) {
@@ -64,7 +65,7 @@ const v1Fold: Fold<Note> = {
     }
     return { store: importRecords(notes, s, incoming), mark: JSON.stringify({ hash: hash(text), texts }) };
   },
-};
+});
 
 function parseMark(text: string | null): { hash: string; texts: Record<string, string> } | null {
   try {
@@ -79,15 +80,46 @@ export const notes: Model<Note> = {
   qrPrefix: 'NOTES',
   purgeAfter: 90 * 24 * 3600_000,
   kind: key => (NOTE.test(key) ? noteKind : key === PINNED ? pinnedKind : null),
-  folds: [v1Fold],
+  folds: [v1Fold()],
 };
 
-export function writeNote(s: LocalStore<Note>, id: string, text: string, now: number): LocalStore<Note> {
+/** What the notes app keeps on this device alone: the notes opened here, in the order first opened, and the last one. */
+export interface Here { opened: GSet; last: string | null }
+
+export const here: AppMeta<Here> = {
+  read: meta => ({ opened: gsetFrom(meta.opened), last: isId(meta.last) ? meta.last : null }),
+  write: h => ({ opened: h.opened, last: h.last }),
+  merge: (mine, theirs) => ({ opened: gsetMerge(mine.opened, theirs.opened), last: theirs.last ?? mine.last }),
+};
+
+/** The last note opened, as the build before sync kept it under a key of its own. */
+export const LAST_V1 = 'notes.last';
+
+/** That key folded into the meta, when nothing newer is held. */
+const lastFold: Fold<Note, Here> = {
+  mark: 'last',
+  reads: key => key === LAST_V1,
+  fold(s, get, last) {
+    const id = get(LAST_V1);
+    if (id === null || id === last) return null;
+    return { store: isId(id) && !s.app.last ? { ...s, app: { ...s.app, last: id } } : s, mark: id };
+  },
+};
+
+export const notesHere: Model<Note, Here> = { ...notes, meta: here, folds: [v1Fold(), lastFold] };
+
+/** A note opened on this device. */
+export function openNote(s: LocalStore<Note, Here>, id: string, now: number): LocalStore<Note, Here> {
+  const t = tick(s.clock, now), opened = gsetAdd(s.app.opened, [id], t);
+  return opened === s.app.opened && s.app.last === id ? s : { ...s, clock: t, app: { opened, last: id } };
+}
+
+export function writeNote<A>(s: LocalStore<Note, A>, id: string, text: string, now: number): LocalStore<Note, A> {
   return putRecord(notes, s, noteKey(id), now, (held, t) =>
     held?.text.val === text ? held : { id, text: { val: text, t }, tags: held?.tags ?? {}, u: t, deleted: held?.deleted ?? 0 }).store;
 }
 
-export function tagNote(s: LocalStore<Note>, id: string, tag: string, now: number): LocalStore<Note> {
+export function tagNote<A>(s: LocalStore<Note, A>, id: string, tag: string, now: number): LocalStore<Note, A> {
   return putRecord(notes, s, noteKey(id), now, (held, t) => {
     const base = held ?? { id, text: { val: '', t: 0 }, tags: {}, u: t, deleted: 0 }, tags = gsetAdd(base.tags, [tag], t);
     return held && tags === held.tags ? held : { ...base, tags, u: t };
@@ -95,7 +127,7 @@ export function tagNote(s: LocalStore<Note>, id: string, tag: string, now: numbe
 }
 
 /** A tombstone: the note stays, so another device does not bring it back with older edits; a later edit does. */
-export function deleteNote(s: LocalStore<Note>, id: string, now: number): LocalStore<Note> {
+export function deleteNote<A>(s: LocalStore<Note, A>, id: string, now: number): LocalStore<Note, A> {
   return putRecord(notes, s, noteKey(id), now, (held, t) => (held ? { ...held, deleted: t } : { id, text: { val: '', t: 0 }, tags: {}, u: 0, deleted: t })).store;
 }
 

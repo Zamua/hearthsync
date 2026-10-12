@@ -36,11 +36,11 @@ export class TestClock implements SyncEnv {
   }
 }
 
-export interface Device<R> {
+export interface Device<R, A = undefined> {
   name: string;
   storage: Storage & { data: Map<string, string> };
-  local: Local<R>;
-  sync: Sync<R>;
+  local: Local<R, A>;
+  sync: Sync<R, A>;
   /** This device alone has no connection. */
   down: boolean;
   /** Requests sent as keepalive (the page going away). */
@@ -54,13 +54,13 @@ export interface Device<R> {
 }
 
 /** A device on the fake server; storage carries over to model an app restart. */
-export function device<R>(host: FakeRooms, clock: TestClock, model: Model<R>, name: string, storage = memoryStorage()): Device<R> {
+export function device<R, A = undefined>(host: FakeRooms, clock: TestClock, model: Model<R, A>, name: string, storage = memoryStorage()): Device<R, A> {
   const local = new Local(storage, model, { now: clock.now });
   const held: (() => void)[] = [];
   const d = {
     name, storage, local, down: false, keepalive: [], sent: [], heard: { status: [], account: [], backlog: [], news: [] }, stall: null,
     release: () => { d.stall = null; for (const go of held.splice(0)) go(); },
-  } as unknown as Device<R>;
+  } as unknown as Device<R, A>;
   const fetch: typeof globalThis.fetch = (input, init) => {
     const line = `${init?.method ?? 'GET'} ${new URL(String(input)).pathname}`;
     d.sent.push(line);

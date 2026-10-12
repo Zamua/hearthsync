@@ -45,7 +45,7 @@ const linked = <R>(m: Model<R>, room = R) => switchAccount(emptyStore<R>(), room
 
 describe('example records', () => {
   it('merge by the laws, whatever the inputs', () => {
-    const notesGen = (rng: Rng): Note => ({ id: 'n', text: { val: rng.pick(['a', 'b']), t: rng.int(0, 4) }, tags: rng.next() < 0.5 ? { work: rng.int(0, 3) } : {} });
+    const notesGen = (rng: Rng): Note => ({ id: 'n', text: { val: rng.pick(['a', 'b']), t: rng.int(0, 4) }, tags: rng.next() < 0.5 ? { work: rng.int(0, 3) } : {}, u: rng.int(0, 4), deleted: rng.pick([0, 0, 2, 5]) });
     laws(notesGen, noteKind.merge);
     const puzzleGen = (rng: Rng): Puzzle => ({ run: rng.int(0, 1), game: rng.pick(['g1', 'g2']), cells: rng.next() < 0.5 ? { a1: rng.int(0, 3) } : {}, score: { val: rng.int(0, 2), t: rng.int(0, 3) } });
     laws(puzzleGen, puzzleKind.merge);
@@ -66,7 +66,7 @@ describe('uploading', () => {
     const r = round(notes, a, srv);
     expect(r.moved).toBe(3);
     expect(canon(snap(srv, R))).toBe(canon(accountDocs(notes, r.store)));
-    expect(snap(srv, R)['note/a']).toEqual({ v: 1, id: 'a', text: { val: 'milk', t: 1000 }, tags: {} });
+    expect(snap(srv, R)['note/a']).toEqual({ v: 1, id: 'a', text: { val: 'milk', t: 1000 }, tags: {}, u: 1000, deleted: 0 });
     expect(dirty(notes, r.store)).toEqual([]);
     expect(chips(notes, r.store)).toEqual({ items: { 'note/a': 'saved', 'note/b': 'saved' }, unsaved: 0 });
     expect(plan(notes, r.store, R, snap(srv, R)).puts).toEqual([]);

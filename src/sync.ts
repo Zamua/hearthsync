@@ -6,7 +6,7 @@ import type { Local } from './local.js';
 import { kindOf, recordsIn, type Records } from './records.js';
 import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, type Chip, type Put } from './plan.js';
 import { RoomError, type RoomApi } from './rooms.js';
-import { adoptAccount, forwardDone, queueForward, switchAccount, type LocalStore } from './store.js';
+import { adoptAccount, expire, forwardDone, oldestTombstone, purgeDone, purgeRecord, queueForward, switchAccount, type LocalStore } from './store.js';
 
 // The sync engine: the device's store and its account room, reconciled in the background. The domain decides what to
 // merge and what to PUT (plan.ts); this runs rounds against the room, acknowledges what the server took, backs off when
@@ -332,6 +332,7 @@ export class Sync<R> {
     if (this.env.now() < this.pausedUntil || !this.env.online()) { this.touch(); return; }
     this.madeAccount = false;
     try {
+      this.local.edit((s, now) => expire(this.m, s, now), 'sync');
       await this.ensureAccount();
       let quiet = false;
       for (let lap = 0; lap < MAX_LAPS && !quiet; lap++) {
@@ -339,6 +340,7 @@ export class Sync<R> {
         const room = this.next();
         if (room && await this.round(room, full && lap === 0)) quiet = false;
       }
+      await this.purgeKeys();
       await this.writeForwards();
       this.failures = 0;
       this.backoffUntil = 0;
@@ -461,13 +463,45 @@ export class Sync<R> {
     return sent;
   }
 
-  /** One PUT: whether the server took it. */
+  /** One PUT: whether the server took it. A full account room first gives up its oldest tombstone for a new key. */
   private async putOne(put: Put, keepalive: boolean): Promise<boolean> {
-    try { await this.api.put(put.room, put.key, put.value, keepalive ? { keepalive } : undefined); return true; } catch (e) {
-      if (!(e instanceof RoomError)) throw e;
-      if (e.status === 413) { this.full.add(put.room); return false; }
-      if (e.status === 404 || e.status === 400) { this.missing(put.room, e.status); return false; }
-      throw e;
+    for (let freed = false; ;) {
+      try { await this.api.put(put.room, put.key, put.value, keepalive ? { keepalive } : undefined); return true; } catch (e) {
+        if (!(e instanceof RoomError)) throw e;
+        if (e.status === 413) {
+          if (!freed && !keepalive && await this.freeSlot(put.room, put.key)) { freed = true; continue; }
+          this.full.add(put.room);
+          return false;
+        }
+        if (e.status === 404 || e.status === 400) { this.missing(put.room, e.status); return false; }
+        throw e;
+      }
+    }
+  }
+
+  /** Deletes the oldest tombstone the account room holds, to make room for a new key: whether one went. */
+  private async freeSlot(room: string, key: string): Promise<boolean> {
+    const held = this.serverKeys.get(room);
+    if (room !== this.local.store.account || !held || held.has(key)) return false;
+    const drop = oldestTombstone(this.m, this.local.store, k => held.has(k));
+    if (!drop) return false;
+    this.local.edit(s => purgeRecord(this.m, s, drop), 'sync');
+    await this.purgeKeys();
+    return !held.has(drop);
+  }
+
+  /** Purged records' keys, deleted from the account room. */
+  private async purgeKeys(): Promise<void> {
+    const room = this.local.store.account;
+    if (!room || this.lostAccount) return;
+    for (const key of Object.keys(this.local.store.purge)) {
+      try { await this.api.delete(room, key); } catch (e) {
+        if (e instanceof RoomError && (e.status === 404 || e.status === 400)) { this.missing(room, e.status); return; }
+        throw e;
+      }
+      this.local.edit(s => purgeDone(s, key), 'sync');
+      this.serverKeys.get(room)?.delete(key);
+      this.full.delete(room);
     }
   }
 

@@ -2,7 +2,7 @@ import { accountFrom, isNewer } from './account.js';
 import { isRoomId } from './code.js';
 import { isStamp } from './crdt.js';
 import type { Fold, Model } from './model.js';
-import { docOf, kindOf, stampOf, versionOf } from './records.js';
+import { docOf, homeKind, stampOf, versionOf } from './records.js';
 import { isObj, type Obj } from './repair.js';
 import { emptyStore, type LocalStore } from './store.js';
 
@@ -35,9 +35,10 @@ export function browserStorage(): Storage {
   };
 }
 
-/** The meta's format: one above it is a newer build's. */
+/** The meta's format by default, and the oldest this reads: one above the model's is a newer build's. */
 const META_V = 2;
 const META = 'meta', ACKS = 'acks';
+const metaV = <R>(m: Model<R>): number => m.storeVersion ?? META_V;
 
 /** A record's name in storage: its room key with each `/` as a `.`. */
 export const storageName = (key: string): string => key.replace(/\//g, '.');
@@ -51,7 +52,7 @@ const strings = (raw: unknown, ok: (k: string, v: string) => boolean): Record<st
 const metaVersion = (raw: unknown): number | null => (isObj(raw) && typeof raw.v === 'number' ? raw.v : null);
 
 /** Whether a newer build wrote this storage's meta: this build reads what it can of it and never writes over it. */
-export const newerStore = <R>(st: Storage, m: Model<R>): boolean => (metaVersion(parse(st.get(m.prefix + META))) ?? 0) > META_V;
+export const newerStore = <R>(st: Storage, m: Model<R>): boolean => (metaVersion(parse(st.get(m.prefix + META))) ?? 0) > metaV(m);
 
 /**
  * The store, or null when this device has none yet. Records are read even without a meta (a write cut short, or
@@ -65,7 +66,7 @@ export function readStore<R>(st: Storage, m: Model<R>): LocalStore<R> | null {
   const records: Record<string, R> = {};
   for (const full of st.keys()) {
     if (!full.startsWith(m.prefix)) continue;
-    const name = full.slice(m.prefix.length), key = roomKey(name), kind = skip.has(name) ? null : kindOf(m, key);
+    const name = full.slice(m.prefix.length), key = roomKey(name), kind = skip.has(name) ? null : homeKind(m, key);
     if (!kind) continue;
     const doc = parse(st.get(full)), r = isNewer(doc, versionOf(m)) ? null : kind.from(doc, key);
     if (r !== null) records[key] = r;
@@ -84,6 +85,7 @@ export function readStore<R>(st: Storage, m: Model<R>): LocalStore<R> | null {
     clock: Math.max(isStamp(meta.clock) ? meta.clock : 0, stampOf(m, records)),
     records, acks,
     forwards: strings(meta.forwards, (k, v) => isRoomId(k) && isRoomId(v)),
+    purge: Object.fromEntries(Object.entries(isObj(meta.purge) ? meta.purge : {}).filter((e): e is [string, number] => homeKind(m, e[0]) !== null && isStamp(e[1]))),
   };
 }
 
@@ -131,7 +133,7 @@ export class Persist<R> {
 
   /** Each key with the object it holds (unchanged objects are skipped by identity) and its doc. */
   private entries(s: LocalStore<R>): Entry[] {
-    const p = this.m.prefix, meta = { v: META_V, account: s.account, profile: s.profile, clock: s.clock, forwards: s.forwards };
+    const p = this.m.prefix, meta = { v: metaV(this.m), account: s.account, profile: s.profile, clock: s.clock, forwards: s.forwards, purge: s.purge };
     return [
       ...Object.entries(s.records).map(([key, r]): Entry => [p + storageName(key), r, () => docOf(this.m, key, r)]),
       [p + ACKS, s.acks, () => s.acks],

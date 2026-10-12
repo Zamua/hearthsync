@@ -1,10 +1,12 @@
-import { gsetAdd, gsetList, gsetMerge, hash, lww, tick, type GSet, type Reg, type Stamp } from '../src/crdt.js';
+import { UNTIMED, gsetAdd, gsetList, gsetMerge, hash, isStamp, lww, tick, type GSet, type Reg, type Stamp } from '../src/crdt.js';
 import { playOrder, samePlay, type Fold, type Kind, type Model, type Playthrough } from '../src/model.js';
 import { gsetFrom, isObj, regFrom } from '../src/repair.js';
 import { importRecords, putRecord, type LocalStore, type PutResult } from '../src/store.js';
+import type { Records } from '../src/records.js';
 
-// Two example apps for the tests. Notes: one record per note, merged field by field, with a fold of the list it kept
-// before sync. Puzzles: three save slots, each a playthrough that never mixes with another.
+// Two example apps for the tests. Notes: one record per note, merged field by field and deleted as a tombstone, with a
+// fold of the list it kept before sync and the one note an earlier build pinned in the room. Puzzles: three save
+// slots, each a playthrough that never mixes with another.
 
 const isText = (x: unknown): x is string => typeof x === 'string' && x.length <= 2000;
 const isCount = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0 && x <= 1_000_000;
@@ -12,7 +14,8 @@ const isId = (x: unknown): x is string => typeof x === 'string' && /^[0-9a-z-]{1
 
 // Notes.
 
-export interface Note { id: string; text: Reg<string>; tags: GSet }
+/** u: last edited; deleted: when deleted, 0 never. Gone while deleted > u. */
+export interface Note { id: string; text: Reg<string>; tags: GSet; u: Stamp; deleted: Stamp }
 
 const NOTE = /^note\/([0-9a-z-]{1,40})$/;
 export const noteKey = (id: string): string => `note/${id}`;
@@ -21,16 +24,25 @@ export const noteKind: Kind<Note> = {
   from(raw, key) {
     const id = NOTE.exec(key)?.[1];
     if (!id || !isObj(raw) || raw.id !== id) return null;
-    return { id, text: regFrom(raw.text, isText) ?? { val: '', t: 0 }, tags: gsetFrom(raw.tags) };
+    const u = isStamp(raw.u) ? raw.u : 0, deleted = isStamp(raw.deleted) ? raw.deleted : 0;
+    return { id, text: regFrom(raw.text, isText) ?? { val: '', t: 0 }, tags: gsetFrom(raw.tags), u, deleted };
   },
-  merge: (a, b) => ({ id: a.id, text: lww(a.text, b.text), tags: gsetMerge(a.tags, b.tags) }),
-  stamp: r => Math.max(r.text.t, ...Object.values(r.tags)),
+  merge: (a, b) => ({ id: a.id, text: lww(a.text, b.text), tags: gsetMerge(a.tags, b.tags), u: Math.max(a.u, b.u), deleted: Math.max(a.deleted, b.deleted) }),
+  stamp: r => Math.max(r.text.t, r.u, r.deleted, ...Object.values(r.tags)),
+  life: r => ({ used: r.u, deleted: r.deleted }),
+};
+
+/** The one note the build before one key per note kept in the room, under `pinned`. */
+export const PINNED = 'pinned';
+export const pinnedKind: Kind<Note> = {
+  ...noteKind,
+  from: raw => (isObj(raw) && isId(raw.id) ? noteKind.from(raw, noteKey(raw.id)) : null),
+  home: r => noteKey(r.id),
 };
 
 /** The list kept before sync: `notes.v1`, note id to text. */
 export const NOTES_V1 = 'notes.v1';
-/** A value from before sync: any edit made since beats it, and it beats a record's placeholders (stamp 0). */
-export const V1_STAMP = 1;
+export const V1_STAMP = UNTIMED;
 
 /** The v1 list folded in: on the first fold every text at V1_STAMP, later only texts changed since stamped now. */
 const v1Fold: Fold<Note> = {
@@ -47,7 +59,8 @@ const v1Fold: Fold<Note> = {
     for (const [id, val] of Object.entries(isObj(raw) ? raw : {})) {
       if (!isId(id) || !isText(val)) continue;
       texts[id] = hash(val);
-      incoming[noteKey(id)] = { id, text: { val, t: before && before.texts[id] !== texts[id] ? t : V1_STAMP }, tags: {} };
+      const at = before && before.texts[id] !== texts[id] ? t : V1_STAMP;
+      incoming[noteKey(id)] = { id, text: { val, t: at }, tags: {}, u: at, deleted: 0 };
     }
     return { store: importRecords(notes, s, incoming), mark: JSON.stringify({ hash: hash(text), texts }) };
   },
@@ -64,25 +77,31 @@ export const notes: Model<Note> = {
   prefix: 'notes.v2.',
   salt: 'notes/public/',
   qrPrefix: 'NOTES',
-  kind: key => (NOTE.test(key) ? noteKind : null),
+  purgeAfter: 90 * 24 * 3600_000,
+  kind: key => (NOTE.test(key) ? noteKind : key === PINNED ? pinnedKind : null),
   folds: [v1Fold],
 };
 
 export function writeNote(s: LocalStore<Note>, id: string, text: string, now: number): LocalStore<Note> {
   return putRecord(notes, s, noteKey(id), now, (held, t) =>
-    held?.text.val === text ? held : { id, text: { val: text, t }, tags: held?.tags ?? {} }).store;
+    held?.text.val === text ? held : { id, text: { val: text, t }, tags: held?.tags ?? {}, u: t, deleted: held?.deleted ?? 0 }).store;
 }
 
 export function tagNote(s: LocalStore<Note>, id: string, tag: string, now: number): LocalStore<Note> {
   return putRecord(notes, s, noteKey(id), now, (held, t) => {
-    const base = held ?? { id, text: { val: '', t: 0 }, tags: {} }, tags = gsetAdd(base.tags, [tag], t);
-    return held && tags === held.tags ? held : { ...base, tags };
+    const base = held ?? { id, text: { val: '', t: 0 }, tags: {}, u: t, deleted: 0 }, tags = gsetAdd(base.tags, [tag], t);
+    return held && tags === held.tags ? held : { ...base, tags, u: t };
   }).store;
 }
 
-/** Each note as the app shows it: id to text and tags in the order added. */
-export function notesOf(s: LocalStore<Note>): Record<string, { text: string; tags: string[] }> {
-  return Object.fromEntries(Object.values(s.records).map(n => [n.id, { text: n.text.val, tags: gsetList(n.tags) }]));
+/** A tombstone: the note stays, so another device does not bring it back with older edits; a later edit does. */
+export function deleteNote(s: LocalStore<Note>, id: string, now: number): LocalStore<Note> {
+  return putRecord(notes, s, noteKey(id), now, (held, t) => (held ? { ...held, deleted: t } : { id, text: { val: '', t: 0 }, tags: {}, u: 0, deleted: t })).store;
+}
+
+/** Each live note as the app shows it: id to text and tags in the order added. */
+export function notesOf(s: { records: Records<Note> }): Record<string, { text: string; tags: string[] }> {
+  return Object.fromEntries(Object.values(s.records).filter(n => n.deleted <= n.u).map(n => [n.id, { text: n.text.val, tags: gsetList(n.tags) }]));
 }
 
 // Puzzles.

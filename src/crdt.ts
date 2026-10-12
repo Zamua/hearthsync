@@ -13,6 +13,9 @@ export type GSet = Readonly<Record<string, Stamp>>;
 export interface Win { at: Stamp; by?: string }
 export type Wins = Readonly<Record<string, Win>>;
 
+/** The stamp of a value kept before sync, with no time: any edit beats it, and it beats placeholders at 0. */
+export const UNTIMED: Stamp = 1;
+
 export const isStamp = (x: unknown): x is Stamp => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0;
 
 /** JSON with object keys sorted and undefined members dropped. */

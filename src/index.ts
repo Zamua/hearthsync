@@ -3,7 +3,7 @@ export { sha256, sha256Hex, toHex } from './sha256.js';
 export { ALPHABET, CODE_LENGTH, checkSymbols, codeFromRoom, codeSymbols, formatCode, isRoomId, parseCode, qrText, type CodeError } from './code.js';
 export { nameTag, publicId, resolveForward, tagOf } from './identity.js';
 export {
-  canon, gsetAdd, gsetList, gsetMerge, hash, isStamp, lww, lwwOpt, regsMerge, tick, winMerge, winsList, winsMerge,
+  UNTIMED, canon, gsetAdd, gsetList, gsetMerge, hash, isStamp, lww, lwwOpt, regsMerge, tick, winMerge, winsList, winsMerge,
   type GSet, type Reg, type Regs, type Stamp, type Win, type Wins,
 } from './crdt.js';
 export { MAX_MEMBERS, gsetFrom, isMember, isObj, isPid, regFrom, regsFrom, winFrom, winsFrom, type Obj } from './repair.js';
@@ -12,10 +12,10 @@ export {
   type AccountDoc, type ForwardDoc,
 } from './account.js';
 export { playOrder, samePlay, type Fold, type Kind, type Model, type Playthrough, type Snapshot } from './model.js';
-export { docOf, docsOf, kindOf, mergeRecords, recordsIn, stampOf, type MergeMode, type Records } from './records.js';
+export { docOf, docsOf, homeKind, isLive, kindOf, mergeRecords, recordsIn, stampOf, tombstoneOf, type MergeMode, type Records } from './records.js';
 export {
-  adoptAccount, editRecords, emptyStore, forwardDone, importRecords, moved, putRecord, queueForward, switchAccount,
-  type Acks, type LocalStore, type PutResult,
+  adoptAccount, editRecords, emptyStore, expire, forwardDone, importRecords, moved, oldestTombstone, purgeDone, purgeRecord, putRecord,
+  queueForward, roomFor, switchAccount, type Acks, type LocalStore, type PutResult,
 } from './store.js';
 export {
   NEWER, absorbAccount, accountDocs, acknowledge, changed, chips, dirty, joinAccount, plan, roomDocs, roomsOf, takeIn,

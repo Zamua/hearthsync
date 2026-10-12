@@ -26,11 +26,29 @@ export interface Kind<R> {
   /** The doc a room holds; `{ v, ...r }` by default. */
   doc?(r: R): unknown;
   /**
-   * The record's playthrough, for records that never mix across playthroughs (a game's save). Joining an account then
-   * takes its record whole unless it is the same playthrough, merging one in keeps this account's, and a save made for
-   * a playthrough the store no longer holds is refused. Without it, records always merge.
+   * The record's playthrough, for records that never mix across playthroughs (a game's save): a save made for a
+   * playthrough the store no longer holds is refused (`putRecord`), and `otherPlay` says what linking and merging do.
    */
   play?(r: R): Playthrough;
+  /**
+   * Two playthroughs at one key when accounts meet. 'account' (the default): linking takes the joined account's whole
+   * and merging another code in keeps this account's, the other staying in its own room. 'merge': merge decides, as
+   * for an edit from another device.
+   */
+  otherPlay?: 'account' | 'merge';
+  /**
+   * For records that can be deleted: when the record was last used, and when deleted (0: never). It is gone while
+   * deleted > used, and stays as a tombstone so another device does not bring it back with older edits; a later use
+   * anywhere revives it. Tombstones show no chip, upload after live records, and are purged in time.
+   */
+  life?(r: R): { used: Stamp; deleted: Stamp };
+  /** At most this many records of this kind, tombstones counted: the oldest tombstone makes way for a new record. */
+  cap?: number;
+  /**
+   * Makes this kind's keys ones an earlier build wrote: where a record read from one lives now. Such a key is never
+   * written, and is read again only when it changed since last seen.
+   */
+  home?(r: R): string;
 }
 
 /**
@@ -60,9 +78,14 @@ export interface Model<R> {
   qrPrefix?: string;
   /** The format of the app's docs (their `v`): a higher one is a newer build's, left alone. 1 by default. */
   version?: number;
+  /** The format of the local store's meta: a higher one is a newer build's, read but never written. 2 by default. */
+  storeVersion?: number;
+  /** Tombstones this old (in ms) are purged: dropped here, their keys deleted from the account room. Never by default. */
+  purgeAfter?: number;
   /**
-   * The kind of record a room key holds; null for a key that is not the app's (and always for `account` and
-   * `forward`). Keys hold no dot: a record is kept in local storage under its key with each `/` as a `.`.
+   * The kind of record a room key holds, the same object for every key of a kind (a cap counts by it); null for a key
+   * that is not the app's (and always for `account` and `forward`). Keys hold no dot: a record is kept in local storage
+   * under its key with each `/` as a `.`.
    */
   kind(key: string): Kind<R> | null;
   /** Migrations from storage written before sync, in order. */

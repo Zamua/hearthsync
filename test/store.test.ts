@@ -21,18 +21,18 @@ describe('records in the store', () => {
   });
 
   it('refuses a key that is not the model\'s', () => {
-    expect(() => putRecord(notes, emptyStore<Note>(), 'meta', 1, (_h, t) => ({ id: 'x', text: { val: '', t }, tags: {} }))).toThrow();
+    expect(() => putRecord(notes, emptyStore<Note>(), 'meta', 1, (_h, t) => ({ id: 'x', text: { val: '', t }, tags: {}, u: t, deleted: 0 }))).toThrow();
   });
 
   it('an edit of the records takes the next stamp, or leaves the store as it was', () => {
     const s = emptyStore<Note>();
     expect(editRecords(s, 50, r => r)).toBe(s);
-    expect(editRecords(s, 50, (r, t) => ({ ...r, 'note/x': { id: 'x', text: { val: 'hi', t }, tags: {} } })).clock).toBe(50);
+    expect(editRecords(s, 50, (r, t) => ({ ...r, 'note/x': { id: 'x', text: { val: 'hi', t }, tags: {}, u: t, deleted: 0 } })).clock).toBe(50);
   });
 
   it('records from before sync merge in, never past a newer edit, and a record of another playthrough stays out', () => {
     const s = writeNote(emptyStore<Note>(), 'a', 'new', 1000);
-    const old = { 'note/a': { id: 'a', text: { val: 'old', t: 1 }, tags: { work: 1 } }, 'note/b': { id: 'b', text: { val: 'kept', t: 1 }, tags: {} } };
+    const old: Record<string, Note> = { 'note/a': { id: 'a', text: { val: 'old', t: 1 }, tags: { work: 1 }, u: 1, deleted: 0 }, 'note/b': { id: 'b', text: { val: 'kept', t: 1 }, tags: {}, u: 1, deleted: 0 } };
     expect(notesOf(importRecords(notes, s, old))).toEqual({ a: { text: 'new', tags: ['work'] }, b: { text: 'kept', tags: [] } });
     const p = solve(emptyStore<Puzzle>(), 1, P1, 'a1', 3, 1000).store;
     const other = { [slotKey(1)]: { ...newPuzzle({ run: 4, game: 'g9' }, 1), cells: { z9: 1 } } };

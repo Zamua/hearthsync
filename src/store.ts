@@ -1,9 +1,9 @@
 import type { AccountDoc } from './account.js';
 import { isRoomId } from './code.js';
-import { canon, tick, type Stamp } from './crdt.js';
+import { UNTIMED, canon, tick, type Stamp } from './crdt.js';
 import { publicId } from './identity.js';
-import { samePlay, type Model, type Playthrough } from './model.js';
-import { kindOf, mergeRecords, stampOf, type Records } from './records.js';
+import { samePlay, type Kind, type Model, type Playthrough } from './model.js';
+import { homeKind, kindOf, mergeRecords, stampOf, tombstoneOf, type Records } from './records.js';
 
 // This device's copy of the account: the only thing the app reads, written before any network call. Every edit takes
 // the wall clock (plus server skew) and stamps through the store's clock.
@@ -17,14 +17,16 @@ export interface LocalStore<R> {
   profile: AccountDoc | null;
   /** The highest stamp made or seen. */
   clock: Stamp;
-  /** The app's records, by room key. */
+  /** The app's records by room key, tombstones among them until purged. */
   records: Records<R>;
   acks: Acks;
   /** Account rooms this device left, each owed a forward to the current account once everything is uploaded there. */
   forwards: Readonly<Record<string, string>>;
+  /** Keys of purged records to delete from the account room, each with the tombstone's stamp. */
+  purge: Readonly<Record<string, Stamp>>;
 }
 
-export const emptyStore = <R>(): LocalStore<R> => ({ account: null, profile: null, clock: 0, records: {}, acks: {}, forwards: {} });
+export const emptyStore = <R>(): LocalStore<R> => ({ account: null, profile: null, clock: 0, records: {}, acks: {}, forwards: {}, purge: {} });
 
 /** An edit of the records, given the next stamp; the store itself when f hands them back unchanged. */
 export function editRecords<R>(s: LocalStore<R>, now: number, f: (records: Records<R>, t: Stamp) => Records<R>): LocalStore<R> {
@@ -38,23 +40,82 @@ export function moved<R>(m: Model<R>, s: LocalStore<R>, key: string, play: Playt
   return held !== undefined && !!k?.play && !samePlay(k.play(held), play);
 }
 
-/** saved: the store took it; same: nothing changed; moved: refused, the store holds another playthrough there. */
-export type PutResult = 'saved' | 'same' | 'moved';
+const count = <R>(m: Model<R>, s: LocalStore<R>, k: Kind<R>): number => Object.keys(s.records).filter(key => kindOf(m, key) === k).length;
+
+/** Whether a new record fits at key: under its kind's cap, or a tombstone of that kind can make way. */
+export function roomFor<R>(m: Model<R>, s: LocalStore<R>, key: string): boolean {
+  const k = homeKind(m, key);
+  if (!k) return false;
+  return k.cap === undefined || key in s.records || count(m, s, k) < k.cap || oldestTombstone(m, s, x => kindOf(m, x) === k) !== null;
+}
+
+/** The key of the oldest tombstone, among the keys `allow` passes. */
+export function oldestTombstone<R>(m: Model<R>, s: LocalStore<R>, allow: (key: string) => boolean = () => true): string | null {
+  let best: { key: string; at: Stamp } | null = null;
+  for (const [key, r] of Object.entries(s.records)) {
+    const at = tombstoneOf(m, key, r);
+    if (at > 0 && allow(key) && (!best || at < best.at || (at === best.at && key < best.key))) best = { key, at };
+  }
+  return best?.key ?? null;
+}
+
+/**
+ * A tombstone dropped for good. If the account room may hold it (it was acknowledged there), its key is listed for
+ * deletion; the stamp lets a later use elsewhere still revive it.
+ */
+export function purgeRecord<R>(m: Model<R>, s: LocalStore<R>, key: string): LocalStore<R> {
+  const r = s.records[key];
+  if (r === undefined || !tombstoneOf(m, key, r)) return s;
+  const { [key]: _, ...records } = s.records;
+  const acc = s.account, acks = acc ? s.acks[acc] ?? {} : {}, held = acc !== null && Object.hasOwn(acks, key);
+  const { [key]: __, ...keep } = acks;
+  return { ...s, records, ...(held ? { purge: { ...s.purge, [key]: tombstoneOf(m, key, r) }, acks: { ...s.acks, [acc]: keep } } : {}) };
+}
+
+/** The purged key is gone from the account room. */
+export function purgeDone<R>(s: LocalStore<R>, key: string): LocalStore<R> {
+  if (!Object.hasOwn(s.purge, key)) return s;
+  const { [key]: _, ...purge } = s.purge;
+  return { ...s, purge };
+}
+
+/** Tombstones older than the model's purgeAfter, purged. One without a time waits until a slot is needed. */
+export function expire<R>(m: Model<R>, s: LocalStore<R>, now: number): LocalStore<R> {
+  if (m.purgeAfter === undefined) return s;
+  let out = s;
+  for (const [key, r] of Object.entries(s.records)) {
+    const at = tombstoneOf(m, key, r);
+    if (at > UNTIMED && now - at >= m.purgeAfter) out = purgeRecord(m, out, key);
+  }
+  return out;
+}
+
+/** saved: the store took it; same: nothing changed; moved: refused, the store holds another playthrough there; full: refused, at its kind's cap. */
+export type PutResult = 'saved' | 'same' | 'moved' | 'full';
 
 /**
  * A save of the record at key. f gets the record held (null if none) and the stamp to put on what it changes, and
- * hands back the record, or the one held when nothing changed. With play, a session's save of a playthrough the store
- * no longer holds (one linked or followed in, or a new game begun elsewhere) is refused, never merged: its own merge
- * order might otherwise bring the old playthrough back.
+ * hands back the record, or the one held when nothing changed. A new record past its kind's cap first purges the
+ * oldest tombstone of that kind, and is refused when there is none. With play, a session's save of a playthrough the
+ * store no longer holds (one linked or followed in, or a new game begun elsewhere) is refused, never merged: its own
+ * merge order might otherwise bring the old playthrough back.
  */
 export function putRecord<R>(
   m: Model<R>, s: LocalStore<R>, key: string, now: number, f: (held: R | null, t: Stamp) => R, play?: Playthrough,
 ): { store: LocalStore<R>; result: PutResult } {
-  if (!kindOf(m, key)) throw new Error(`not a key of this model: ${key}`);
+  const k = homeKind(m, key);
+  if (!k) throw new Error(`not a key of this model: ${key}`);
   if (play && moved(m, s, key, play)) return { store: s, result: 'moved' };
-  const held = s.records[key] ?? null, t = tick(s.clock, now), next = f(held, t);
+  const held = s.records[key] ?? null;
+  let base = s;
+  if (held === null && k.cap !== undefined && count(m, s, k) >= k.cap) {
+    const drop = oldestTombstone(m, s, x => kindOf(m, x) === k);
+    if (!drop) return { store: s, result: 'full' };
+    base = purgeRecord(m, s, drop);
+  }
+  const t = tick(base.clock, now), next = f(held, t);
   if (next === held) return { store: s, result: 'same' };
-  return { store: { ...s, clock: t, records: { ...s.records, [key]: next } }, result: 'saved' };
+  return { store: { ...base, clock: t, records: { ...base.records, [key]: next } }, result: 'saved' };
 }
 
 /**
@@ -76,11 +137,12 @@ export function adoptAccount<R>(s: LocalStore<R>, room: string, now: number, sal
 /**
  * This device moves to another account (a code typed, or a forward followed). The room it leaves is returned, to
  * receive a forward once the upload there is done. The target's own manifest wins on the first scan, being older.
+ * Purges owed name keys of the room left behind, so they go.
  */
 export function switchAccount<R>(s: LocalStore<R>, room: string, now: number, salt: string): { store: LocalStore<R>; previous: string | null } {
   if (s.account === room || !isRoomId(room)) return { store: s, previous: null };
   const t = tick(s.clock, now);
-  return { store: { ...s, account: room, profile: { pid: publicId(room, salt), made: t }, clock: t }, previous: s.account };
+  return { store: { ...s, account: room, profile: { pid: publicId(room, salt), made: t }, clock: t, purge: {} }, previous: s.account };
 }
 
 /** The account room `from` is owed a forward to this device's account, written once everything is uploaded there. */

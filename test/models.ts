@@ -4,10 +4,10 @@ import { gsetFrom, isObj, regFrom } from '../src/repair.js';
 import { importRecords, putRecord, type LocalStore, type PutResult } from '../src/store.js';
 import type { Records } from '../src/records.js';
 
-// Two example apps for the tests. Notes: one record per note, merged field by field and deleted as a tombstone, with a
+// Three example apps for the tests. Notes: one record per note, merged field by field and deleted as a tombstone, with a
 // fold of the list it kept before sync and the one note an earlier build pinned in the room; a variant also keeps the
 // notes opened on this device in the store's meta. Puzzles: three save slots, each a playthrough that never mixes with
-// another.
+// another. Boards: each shared with friends in a room of its own, beside lists the account keeps to itself.
 
 const isText = (x: unknown): x is string => typeof x === 'string' && x.length <= 2000;
 const isCount = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0 && x <= 1_000_000;
@@ -178,3 +178,55 @@ export function startOver(s: LocalStore<Puzzle>, slot: number, game: string, now
 }
 
 export const cellsOf = (s: LocalStore<Puzzle>, slot: number): string[] => gsetList(s.records[slotKey(slot)]?.cells ?? {});
+
+// Boards.
+
+/** A board, shared with friends in a room of its own; a list, the account's alone. Deleted as tombstones. */
+export interface Board { id: string; title: Reg<string>; pins: GSet; u: Stamp; deleted: Stamp }
+
+const BOARD = /^(board|list)\/([0-9a-z-]{1,40})$/;
+export const boardKey = (id: string): string => `board/${id}`;
+export const listKey = (id: string): string => `list/${id}`;
+
+const boardFrom = (raw: unknown, key: string): Board | null => {
+  const id = BOARD.exec(key)?.[2];
+  if (!id || !isObj(raw) || raw.id !== id) return null;
+  const u = isStamp(raw.u) ? raw.u : 0, deleted = isStamp(raw.deleted) ? raw.deleted : 0;
+  return { id, title: regFrom(raw.title, isText) ?? { val: '', t: 0 }, pins: gsetFrom(raw.pins), u, deleted };
+};
+
+export const listKind: Kind<Board> = {
+  from: boardFrom,
+  merge: (a, b) => ({ id: a.id, title: lww(a.title, b.title), pins: gsetMerge(a.pins, b.pins), u: Math.max(a.u, b.u), deleted: Math.max(a.deleted, b.deleted) }),
+  stamp: r => Math.max(r.title.t, r.u, r.deleted, ...Object.values(r.pins)),
+  life: r => ({ used: r.u, deleted: r.deleted }),
+};
+
+export const boardKind: Kind<Board> = { ...listKind, room: 'own', cap: 3 };
+
+export const boards: Model<Board> = {
+  prefix: 'boards.v1.',
+  salt: 'boards/public/',
+  purgeAfter: 30 * 24 * 3600_000,
+  kind: key => (key.startsWith('board/') && BOARD.test(key) ? boardKind : key.startsWith('list/') && BOARD.test(key) ? listKind : null),
+};
+
+/** A save of a board or list at key: its title, and pins added. */
+export function editBoard(s: LocalStore<Board>, key: string, now: number, o: { title?: string; pin?: string }): LocalStore<Board> {
+  const id = BOARD.exec(key)![2]!;
+  return putRecord(boards, s, key, now, (held, t) => {
+    const base = held ?? { id, title: { val: '', t: 0 }, pins: {}, u: t, deleted: 0 };
+    const title = o.title === undefined || base.title.val === o.title ? base.title : { val: o.title, t };
+    const pins = o.pin === undefined ? base.pins : gsetAdd(base.pins, [o.pin], t);
+    return held && title === held.title && pins === held.pins ? held : { ...base, title, pins, u: t };
+  }).store;
+}
+
+export function deleteBoard(s: LocalStore<Board>, key: string, now: number): LocalStore<Board> {
+  return putRecord(boards, s, key, now, (held, t) => ({ ...held!, deleted: t })).store;
+}
+
+/** Each live board or list as the app shows it: key to title and pins in the order added. */
+export function boardsOf(s: { records: Records<Board> }): Record<string, { title: string; pins: string[] }> {
+  return Object.fromEntries(Object.entries(s.records).filter(([, b]) => b.deleted <= b.u).map(([k, b]) => [k, { title: b.title.val, pins: gsetList(b.pins) }]));
+}

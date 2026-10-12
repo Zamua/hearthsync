@@ -83,7 +83,7 @@ describe('models without the hook', () => {
   it('keep the meta exactly as before, and no app state', () => {
     const st = memoryStorage(), l = new Local(st, notes, env());
     l.edit((s, now) => adoptAccount(writeNote(s, 'a', 'milk', now), ROOM, now, notes.salt));
-    expect(Object.keys(meta(st))).toEqual(['v', 'account', 'profile', 'clock', 'forwards', 'purge']);
+    expect(Object.keys(meta(st))).toEqual(['v', 'account', 'profile', 'clock', 'forwards', 'purge', 'shared']);
     expect(l.store.app).toBeUndefined();
     expect(readStore(st, notes)!.app).toBeUndefined();
   });

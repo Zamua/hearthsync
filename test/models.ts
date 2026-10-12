@@ -207,6 +207,7 @@ export const boardKind: Kind<Board> = { ...listKind, room: 'own', cap: 3 };
 export const boards: Model<Board> = {
   prefix: 'boards.v1.',
   salt: 'boards/public/',
+  purgeAfter: 30 * 24 * 3600_000,
   kind: key => (key.startsWith('board/') && BOARD.test(key) ? boardKind : key.startsWith('list/') && BOARD.test(key) ? listKind : null),
 };
 

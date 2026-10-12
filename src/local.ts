@@ -81,7 +81,7 @@ export function readStore<R, A>(st: Storage, m: Model<R, A>): LocalStore<R, A> |
     if (!isRoomId(room) || !isObj(keys)) continue;
     acks[room] = Object.fromEntries(Object.entries(keys).filter((e): e is [string, string] => typeof e[1] === 'string'));
   }
-  const shared = sharedRegs(meta.shared, k => ownsRoom(m, k));
+  const shared = sharedRegs(meta.shared, k => ownsRoom(m, k) && k in records);
   return {
     ...emptyStore<R, A>(appOf(m, meta)),
     account: isRoomId(meta.account) ? meta.account : null,

@@ -20,7 +20,10 @@ export interface LocalStore<R, A = undefined> {
   /** The app's records by room key, tombstones among them until purged. */
   records: Records<R>;
   acks: Acks;
-  /** Account rooms this device left, each owed a forward to the current account once everything is uploaded there. */
+  /**
+   * Rooms this device left, each owed a forward once everything is uploaded where it leads: an account room to the
+   * current account, a shared room to the room its record moved to (named here).
+   */
   forwards: Readonly<Record<string, string>>;
   /** Keys of purged records to delete from the account room, each with the tombstone's stamp. */
   purge: Readonly<Record<string, Stamp>>;
@@ -69,16 +72,19 @@ export function oldestTombstone<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>,
 }
 
 /**
- * A tombstone dropped for good. If the account room may hold it (it was acknowledged there), its key is listed for
- * deletion; the stamp lets a later use elsewhere still revive it.
+ * A tombstone dropped for good, with the room it was shared in. If the account room may hold it (it was acknowledged
+ * there), its key is listed for deletion; the stamp lets a later use elsewhere still revive it.
  */
 export function purgeRecord<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string): LocalStore<R, A> {
   const r = s.records[key];
   if (r === undefined || !tombstoneOf(m, key, r)) return s;
   const { [key]: _, ...records } = s.records;
   const acc = s.account, acks = acc ? s.acks[acc] ?? {} : {}, held = acc !== null && Object.hasOwn(acks, key);
-  const { [key]: __, ...keep } = acks;
-  return { ...s, records, ...(held ? { purge: { ...s.purge, [key]: tombstoneOf(m, key, r) }, acks: { ...s.acks, [acc]: keep } } : {}) };
+  const { [key]: __, ...keep } = acks, { [key]: ___, ...shared } = s.shared;
+  return {
+    ...s, records, shared: key in s.shared ? shared : s.shared,
+    ...(held ? { purge: { ...s.purge, [key]: tombstoneOf(m, key, r) }, acks: { ...s.acks, [acc]: keep } } : {}),
+  };
 }
 
 /** The purged key is gone from the account room. */

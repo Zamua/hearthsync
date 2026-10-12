@@ -25,8 +25,10 @@ export interface Plan<R, A = undefined> {
 export function accountDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (s.profile) out[ACCOUNT_KEY] = accountDoc(s.profile);
+  Object.assign(out, docsOf(m, s.records));
+  // After the records, so a device reading between PUTs never finds a room listed for a record not there yet.
   if (Object.keys(s.shared).length) out[SHARED_KEY] = sharedDoc(s.shared);
-  return Object.assign(out, docsOf(m, s.records));
+  return out;
 }
 
 /** A shared room as this device would have it: the docs of the records living there. */
@@ -77,9 +79,11 @@ const newerDoc = <R, A>(m: Model<R, unknown>, key: string, raw: unknown): boolea
 
 /**
  * A room's records, and the rooms of its shared ones, merged in. A key this device purged is not taken back unless a
- * use made after its tombstone revived it.
+ * use made after its tombstone revived it. A shared room is kept only while its record is (or was not read). Where the
+ * read moves a record this device uploaded out of its room (two devices shared it at once, say), that room is owed a
+ * forward to the one that won.
  */
-function mergeIn<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snapshot, mode: MergeMode): LocalStore<R, A> {
+function mergeIn<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snapshot, mode: MergeMode, inScope: (k: string) => boolean = () => true): LocalStore<R, A> {
   const incoming: Record<string, R> = {}, purge: Record<string, number> = { ...s.purge };
   for (const [key, r] of Object.entries(recordsIn(m, snapshot))) {
     if (Object.hasOwn(purge, key)) {
@@ -90,11 +94,18 @@ function mergeIn<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snap
     incoming[key] = r;
   }
   const records = mergeRecords(m, s.records, incoming, mode), revived = Object.keys(purge).length !== Object.keys(s.purge).length;
-  const read = sharedFrom(snapshot[SHARED_KEY], k => ownsRoom(m, k)), shared = Object.keys(read).length ? regsMerge(s.shared, read) : s.shared;
-  const moved = shared !== s.shared && canon(shared) !== canon(s.shared);
-  if (records === s.records && !revived && !moved) return s;
+  const merged = regsMerge(s.shared, sharedFrom(snapshot[SHARED_KEY], k => ownsRoom(m, k)));
+  const shared = Object.fromEntries(Object.entries(merged).filter(([k]) => k in records || !inScope(k)));
+  const moved = canon(shared) !== canon(s.shared);
+  const forwards: Record<string, string> = { ...s.forwards };
+  for (const [k, { val: from }] of Object.entries(s.shared)) {
+    const to = shared[k]?.val;
+    if (to && to !== from && s.acks[from]?.[k] !== undefined) forwards[from] = to;
+  }
+  const owed = Object.keys(forwards).length !== Object.keys(s.forwards).length || canon(forwards) !== canon(s.forwards);
+  if (records === s.records && !revived && !moved && !owed) return s;
   const clock = Math.max(s.clock, stampOf(m, records), sharedStamp(shared));
-  return { ...s, clock, records, purge: revived ? purge : s.purge, shared: moved ? shared : s.shared };
+  return { ...s, clock, records, purge: revived ? purge : s.purge, shared: moved ? shared : s.shared, forwards: owed ? forwards : s.forwards };
 }
 
 /**
@@ -147,7 +158,7 @@ export function plan<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: stri
   if (room === s.account) {
     const fresh: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(read)) if (!legacy.includes(k) || s.acks[room]?.[k] !== hash(v)) fresh[k] = v;
-    next = absorbAccount(m, purgedThere(m, s, room, read, inScope), fresh);
+    next = mergeIn(m, purgedThere(m, s, room, read, inScope), fresh, 'absorb', inScope);
     const a = newer.includes(ACCOUNT_KEY) ? null : accountFrom(read[ACCOUNT_KEY]);
     if (a) next = { ...next, profile: next.profile ? mergeAccount(next.profile, a) : a };
   } else {

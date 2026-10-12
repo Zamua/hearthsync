@@ -243,6 +243,32 @@ describe('a retired shared room', () => {
   });
 });
 
+describe('two devices of one account sharing at once', () => {
+  it('the later share wins on both; the other room forwards there, and its members follow', async () => {
+    const { host, clock } = fakeWorld(), a = await backedUp(host, clock, 'a'), a2 = device(host, clock, boards, 'a2');
+    await a2.sync.linkCode(codeFromRoom(account(a)));
+    const first = await a.sync.share(B1);
+    clock.t += 10;
+    const second = await a2.sync.share(B1);
+    const b = device(host, clock, boards, 'b');
+    expect(await b.sync.join(first)).toBe(B1);
+    await a.sync.sync({ full: true });
+    await a2.sync.sync({ full: true });
+    await a.sync.sync({ full: true });
+    expect(a.local.store.shared[B1]?.val).toBe(second);
+    expect(a2.local.store.shared[B1]?.val).toBe(second);
+    expect(host.snapshot(first).forward).toMatchObject({ v: 1, to: second });
+    expect(host.snapshot(second).forward).toBeUndefined();
+    expect(a.local.store.forwards).toEqual({});
+    edit(b, B1, { pin: 'from-b' });
+    await b.sync.sync({ full: true });
+    expect(b.local.store.shared[B1]?.val).toBe(second);
+    await b.sync.sync({ full: true });
+    await a2.sync.sync({ full: true });
+    expect(boardsOf(a2.local.store)[B1]?.pins).toEqual(['from-b']);
+  });
+});
+
 describe('deleting a shared record', () => {
   it('reaches every member as a tombstone, and its room then leaves sync', async () => {
     const { host, clock } = fakeWorld(), { a, b, room } = await sharedPair(host, clock);
@@ -255,6 +281,31 @@ describe('deleting a shared record', () => {
     const reads = host.requests('GET', new RegExp(room)).length;
     await b.sync.sync({ full: true });
     expect(host.requests('GET', new RegExp(room))).toHaveLength(reads);
+  });
+});
+
+describe('purging a shared record', () => {
+  it('drops its room with its tombstone, here and on the account\'s other devices', async () => {
+    const { host, clock } = fakeWorld(), a = await backedUp(host, clock, 'a'), a2 = device(host, clock, boards, 'a2');
+    await a2.sync.linkCode(codeFromRoom(account(a)));
+    await a.sync.share(B1);
+    await a.sync.sync();
+    await a2.sync.sync({ full: true });
+    expect(Object.keys(a2.local.store.shared)).toEqual([B1]);
+    a.local.edit((s, now) => deleteBoard(s, B1, now));
+    await a.sync.sync();
+    await a2.sync.sync({ full: true });
+    clock.t += boards.purgeAfter! + 60_000;
+    await a.sync.sync({ full: true });
+    expect(a.local.store.records[B1]).toBeUndefined();
+    expect(a.local.store.shared).toEqual({});
+    expect(keysOf(host, account(a))).not.toContain(B1);
+    await a2.sync.sync({ full: true });
+    expect(a2.local.store.records[B1]).toBeUndefined();
+    expect(a2.local.store.shared).toEqual({});
+    await a.sync.sync({ full: true });
+    expect(a.local.store.shared).toEqual({});
+    expect(device(host, clock, boards, 'a', a.storage).local.store.shared).toEqual({});
   });
 });
 

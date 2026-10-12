@@ -37,7 +37,8 @@ A record can also be shared with other accounts, in a room of its own whose id i
 The app describes its records with a `Model`. Each record lives at its own room key (`note/<id>`, `slot/2`, `prefs`)
 and has a `Kind`: how it reads from untrusted JSON, how two copies merge, and the highest stamp it carries. The
 library does everything else: storage, the outbox, rounds against the server, acknowledgements, status chips, links,
-merges and forwards.
+merges and forwards. The room keys `account` (the manifest), `shared` (the rooms of shared records) and `forward` are
+the library's: a model's `kind` is never asked about them, so an app cannot use them.
 
 ```ts
 import { Local, Sync, browserEnv, browserStorage, gsetFrom, gsetMerge, httpRooms, isObj, listen, lww, putRecord, regFrom, webLock } from 'hearthsync';
@@ -143,7 +144,12 @@ await sync.join(room);                          // 'board/trip', merged in and s
   device holds there works offline too.
 - **Not found** is what a join or peek of anything but a shared room gives: a malformed id (no request is sent), an
   unknown or empty room, an account room, a room whose record is deleted. A new record past its kind's `cap` is `full`.
-- **A deleted record** reaches the room as a tombstone, so it is gone for every member; once there, the room leaves sync.
+- **A deleted record** reaches the room as a tombstone, so it is gone for every member; once there, the room leaves
+  sync.
+  Purging the tombstone drops its entry in `shared` too, on every device of the account.
+- **Two devices of one account sharing a record at once** each make a room; the later share wins on both (the
+  register's rule), and the device whose room lost writes a `forward` from it to the winner, so members who joined
+  the losing room follow.
 - **A retired room** holds a `forward`, as an account room does: peeks and joins of an old invite land in the new
   room, and members move their record there. A room answering `404` for `LOST_GAP` is listed in the status's `gone`;
   sharing that record again makes a new room.

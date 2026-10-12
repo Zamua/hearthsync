@@ -639,20 +639,22 @@ export class Sync<R, A = undefined> {
   }
 
   /**
-   * Account rooms this device left get their forward, to the account it syncs now, once everything is uploaded there.
-   * Kept in the store until written, so an app killed before then still writes it.
+   * Rooms this device left get their forward once everything is uploaded where it leads: an account room to the account
+   * it syncs now, a shared room to the room its record moved to. Kept in the store until written, so an app killed
+   * before then still writes it.
    */
   private async writeForwards(): Promise<void> {
-    const to = this.local.store.account;
-    if (!to || this.unsaved(to)) return;
-    for (const from of Object.keys(this.local.store.forwards)) {
+    const s = this.local.store, rooms = new Set(Object.values(s.shared).map(r => r.val));
+    for (const [from, owed] of Object.entries(s.forwards)) {
+      const to = rooms.has(owed) ? owed : s.account;
+      if (!to || this.unsaved(to)) continue;
       if (from !== to) {
         try { await this.api.put(from, FORWARD_KEY, forwardDoc(to, tick(this.local.store.clock, this.local.now()))); } catch (e) {
           // A room that is gone, or refused, has nobody left to follow a forward.
           if (!(e instanceof RoomError) || (e.status !== 404 && e.status !== 400)) throw e;
         }
       }
-      this.local.edit(s => forwardDone(s, from), 'sync');
+      this.local.edit(st => forwardDone(st, from), 'sync');
     }
   }
 

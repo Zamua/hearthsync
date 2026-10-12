@@ -11,7 +11,7 @@ import { homeKind, kindOf, mergeRecords, stampOf, tombstoneOf, type Records } fr
 /** Per room and key: the hash of the doc the server was last seen holding. */
 export type Acks = Readonly<Record<string, Readonly<Record<string, string>>>>;
 
-export interface LocalStore<R> {
+export interface LocalStore<R, A = undefined> {
   /** The account room, once the server has made it (or a code was entered). No code until then. */
   account: string | null;
   profile: AccountDoc | null;
@@ -24,33 +24,37 @@ export interface LocalStore<R> {
   forwards: Readonly<Record<string, string>>;
   /** Keys of purged records to delete from the account room, each with the tombstone's stamp. */
   purge: Readonly<Record<string, Stamp>>;
+  /** The app's own state, kept in the meta (`Model.meta`). */
+  app: A;
 }
 
-export const emptyStore = <R>(): LocalStore<R> => ({ account: null, profile: null, clock: 0, records: {}, acks: {}, forwards: {}, purge: {} });
+/** A store with nothing in it yet; app is the app's starting state (its meta hook's read of `{}`). */
+export const emptyStore = <R, A = undefined>(app: A = undefined as A): LocalStore<R, A> =>
+  ({ account: null, profile: null, clock: 0, records: {}, acks: {}, forwards: {}, purge: {}, app });
 
 /** An edit of the records, given the next stamp; the store itself when f hands them back unchanged. */
-export function editRecords<R>(s: LocalStore<R>, now: number, f: (records: Records<R>, t: Stamp) => Records<R>): LocalStore<R> {
+export function editRecords<R, A>(s: LocalStore<R, A>, now: number, f: (records: Records<R>, t: Stamp) => Records<R>): LocalStore<R, A> {
   const t = tick(s.clock, now), records = f(s.records, t);
   return records === s.records ? s : { ...s, clock: t, records };
 }
 
 /** Whether a session playing `play` at key has been overtaken: the store holds another playthrough there now. */
-export function moved<R>(m: Model<R>, s: LocalStore<R>, key: string, play: Playthrough): boolean {
+export function moved<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string, play: Playthrough): boolean {
   const held = s.records[key], k = kindOf(m, key);
   return held !== undefined && !!k?.play && !samePlay(k.play(held), play);
 }
 
-const count = <R>(m: Model<R>, s: LocalStore<R>, k: Kind<R>): number => Object.keys(s.records).filter(key => kindOf(m, key) === k).length;
+const count = <R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, k: Kind<R>): number => Object.keys(s.records).filter(key => kindOf(m, key) === k).length;
 
 /** Whether a new record fits at key: under its kind's cap, or a tombstone of that kind can make way. */
-export function roomFor<R>(m: Model<R>, s: LocalStore<R>, key: string): boolean {
+export function roomFor<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string): boolean {
   const k = homeKind(m, key);
   if (!k) return false;
   return k.cap === undefined || key in s.records || count(m, s, k) < k.cap || oldestTombstone(m, s, x => kindOf(m, x) === k) !== null;
 }
 
 /** The key of the oldest tombstone, among the keys `allow` passes. */
-export function oldestTombstone<R>(m: Model<R>, s: LocalStore<R>, allow: (key: string) => boolean = () => true): string | null {
+export function oldestTombstone<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, allow: (key: string) => boolean = () => true): string | null {
   let best: { key: string; at: Stamp } | null = null;
   for (const [key, r] of Object.entries(s.records)) {
     const at = tombstoneOf(m, key, r);
@@ -63,7 +67,7 @@ export function oldestTombstone<R>(m: Model<R>, s: LocalStore<R>, allow: (key: s
  * A tombstone dropped for good. If the account room may hold it (it was acknowledged there), its key is listed for
  * deletion; the stamp lets a later use elsewhere still revive it.
  */
-export function purgeRecord<R>(m: Model<R>, s: LocalStore<R>, key: string): LocalStore<R> {
+export function purgeRecord<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string): LocalStore<R, A> {
   const r = s.records[key];
   if (r === undefined || !tombstoneOf(m, key, r)) return s;
   const { [key]: _, ...records } = s.records;
@@ -73,14 +77,14 @@ export function purgeRecord<R>(m: Model<R>, s: LocalStore<R>, key: string): Loca
 }
 
 /** The purged key is gone from the account room. */
-export function purgeDone<R>(s: LocalStore<R>, key: string): LocalStore<R> {
+export function purgeDone<R, A>(s: LocalStore<R, A>, key: string): LocalStore<R, A> {
   if (!Object.hasOwn(s.purge, key)) return s;
   const { [key]: _, ...purge } = s.purge;
   return { ...s, purge };
 }
 
 /** Tombstones older than the model's purgeAfter, purged. One without a time waits until a slot is needed. */
-export function expire<R>(m: Model<R>, s: LocalStore<R>, now: number): LocalStore<R> {
+export function expire<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, now: number): LocalStore<R, A> {
   if (m.purgeAfter === undefined) return s;
   let out = s;
   for (const [key, r] of Object.entries(s.records)) {
@@ -100,9 +104,9 @@ export type PutResult = 'saved' | 'same' | 'moved' | 'full';
  * store no longer holds (one linked or followed in, or a new game begun elsewhere) is refused, never merged: its own
  * merge order might otherwise bring the old playthrough back.
  */
-export function putRecord<R>(
-  m: Model<R>, s: LocalStore<R>, key: string, now: number, f: (held: R | null, t: Stamp) => R, play?: Playthrough,
-): { store: LocalStore<R>; result: PutResult } {
+export function putRecord<R, A>(
+  m: Model<R, unknown>, s: LocalStore<R, A>, key: string, now: number, f: (held: R | null, t: Stamp) => R, play?: Playthrough,
+): { store: LocalStore<R, A>; result: PutResult } {
   const k = homeKind(m, key);
   if (!k) throw new Error(`not a key of this model: ${key}`);
   if (play && moved(m, s, key, play)) return { store: s, result: 'moved' };
@@ -122,13 +126,13 @@ export function putRecord<R>(
  * Records from outside the account (kept before sync), merged in as another account's would be: a record of another
  * playthrough than the one held stays out.
  */
-export function importRecords<R>(m: Model<R>, s: LocalStore<R>, incoming: Records<R>): LocalStore<R> {
+export function importRecords<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, incoming: Records<R>): LocalStore<R, A> {
   const records = mergeRecords(m, s.records, incoming, 'takeIn');
   return records === s.records || canon(records) === canon(s.records) ? s : { ...s, clock: Math.max(s.clock, stampOf(m, incoming)), records };
 }
 
 /** The account room the server just made for this device; a no-op if another tab adopted one first. */
-export function adoptAccount<R>(s: LocalStore<R>, room: string, now: number, salt: string): LocalStore<R> {
+export function adoptAccount<R, A>(s: LocalStore<R, A>, room: string, now: number, salt: string): LocalStore<R, A> {
   if (s.account || !isRoomId(room)) return s;
   const t = tick(s.clock, now);
   return { ...s, account: room, profile: { pid: publicId(room, salt), made: t }, clock: t };
@@ -139,17 +143,17 @@ export function adoptAccount<R>(s: LocalStore<R>, room: string, now: number, sal
  * receive a forward once the upload there is done. The target's own manifest wins on the first scan, being older.
  * Purges owed name keys of the room left behind, so they go.
  */
-export function switchAccount<R>(s: LocalStore<R>, room: string, now: number, salt: string): { store: LocalStore<R>; previous: string | null } {
+export function switchAccount<R, A>(s: LocalStore<R, A>, room: string, now: number, salt: string): { store: LocalStore<R, A>; previous: string | null } {
   if (s.account === room || !isRoomId(room)) return { store: s, previous: null };
   const t = tick(s.clock, now);
   return { store: { ...s, account: room, profile: { pid: publicId(room, salt), made: t }, clock: t, purge: {} }, previous: s.account };
 }
 
 /** The account room `from` is owed a forward to this device's account, written once everything is uploaded there. */
-export const queueForward = <R>(s: LocalStore<R>, from: string): LocalStore<R> =>
+export const queueForward = <R, A>(s: LocalStore<R, A>, from: string): LocalStore<R, A> =>
   !s.account || from === s.account || s.forwards[from] === s.account ? s : { ...s, forwards: { ...s.forwards, [from]: s.account } };
 
-export function forwardDone<R>(s: LocalStore<R>, from: string): LocalStore<R> {
+export function forwardDone<R, A>(s: LocalStore<R, A>, from: string): LocalStore<R, A> {
   if (!Object.hasOwn(s.forwards, from)) return s;
   const { [from]: _, ...forwards } = s.forwards;
   return { ...s, forwards };

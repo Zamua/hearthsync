@@ -100,7 +100,7 @@ type Listener<K extends keyof SyncEvents> = (v: SyncEvents[K]) => void;
 
 const without = (o: Snapshot, key: string): Snapshot => { const { [key]: _, ...rest } = o; return rest; };
 
-export class Sync<R> {
+export class Sync<R, A = undefined> {
   private listeners = new Map<keyof SyncEvents, Set<Listener<never>>>();
   private queue: Promise<unknown> = Promise.resolve();
   private running = 0;
@@ -142,7 +142,7 @@ export class Sync<R> {
   private refreshQueued = false;
   private refreshedAt = -Infinity;
 
-  constructor(private local: Local<R>, private api: RoomApi, private env: SyncEnv, private lock: SyncLock = fn => fn()) {
+  constructor(private local: Local<R, A>, private api: RoomApi, private env: SyncEnv, private lock: SyncLock = fn => fn()) {
     local.on((_next, _prev, source) => {
       this.touch();
       if (source !== 'sync') this.changed();
@@ -681,7 +681,7 @@ export class Sync<R> {
   /** Keys of the room still to upload, whether or not the server can take them now. */
   private unsaved(room: string): boolean { return dirty(this.m, this.local.store).some(p => p.room === room); }
 
-  private tellNews(prev: LocalStore<R>, next: LocalStore<R>): void {
+  private tellNews(prev: LocalStore<R, A>, next: LocalStore<R, A>): void {
     const keys = changed(prev.records, next.records);
     if (keys.length) this.emit('news', { keys });
   }
@@ -763,7 +763,7 @@ export const webLock = (name: string): SyncLock => fn => {
 };
 
 /** The page's own triggers: connection changes, background and foreground, and another tab's writes (an older build's too). */
-export function listen<R>(sync: Sync<R>, local: Local<R>): void {
+export function listen<R, A>(sync: Sync<R, A>, local: Local<R, A>): void {
   addEventListener('online', () => sync.online());
   addEventListener('offline', () => sync.offline());
   document.addEventListener('visibilitychange', () => { if (document.hidden) sync.hidden(); else sync.visible(); });

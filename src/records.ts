@@ -7,36 +7,36 @@ import { samePlay, type Kind, type Model, type Snapshot } from './model.js';
 export type Records<R> = Readonly<Record<string, R>>;
 
 /** The kind of the record at a room key; null for keys that are not the app's. */
-export const kindOf = <R>(m: Model<R>, key: string): Kind<R> | null => (key === ACCOUNT_KEY || key === FORWARD_KEY ? null : m.kind(key));
+export const kindOf = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => (key === ACCOUNT_KEY || key === FORWARD_KEY ? null : m.kind(key));
 
 /** The kind of a key records live at: the app's, and not one an earlier build wrote. */
-export const homeKind = <R>(m: Model<R>, key: string): Kind<R> | null => { const k = kindOf(m, key); return k && !k.home ? k : null; };
+export const homeKind = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => { const k = kindOf(m, key); return k && !k.home ? k : null; };
 
-export const versionOf = <R>(m: Model<R>): number => m.version ?? DOC;
+export const versionOf = <R>(m: Model<R, unknown>): number => m.version ?? DOC;
 
 /** When the record at key was deleted; 0 while it is live, or when its kind is never deleted. */
-export function tombstoneOf<R>(m: Model<R>, key: string, r: R): Stamp {
+export function tombstoneOf<R>(m: Model<R, unknown>, key: string, r: R): Stamp {
   const life = kindOf(m, key)?.life?.(r);
   return life && life.deleted > life.used ? life.deleted : 0;
 }
 
-export const isLive = <R>(m: Model<R>, key: string, r: R): boolean => tombstoneOf(m, key, r) === 0;
+export const isLive = <R>(m: Model<R, unknown>, key: string, r: R): boolean => tombstoneOf(m, key, r) === 0;
 
 /** The doc a room holds for the record at key. */
-export function docOf<R>(m: Model<R>, key: string, r: R): unknown {
+export function docOf<R>(m: Model<R, unknown>, key: string, r: R): unknown {
   const k = kindOf(m, key);
   return k?.doc ? k.doc(r) : { v: versionOf(m), ...(r as object) };
 }
 
 /** The app's docs, by room key: live records first, so a room near its cap takes those before tombstones. */
-export function docsOf<R>(m: Model<R>, records: Records<R>): Record<string, unknown> {
+export function docsOf<R>(m: Model<R, unknown>, records: Records<R>): Record<string, unknown> {
   const out: Record<string, unknown> = {}, entries = Object.entries(records).filter(([key]) => homeKind(m, key));
   for (const live of [true, false]) for (const [key, r] of entries) if (isLive(m, key, r) === live) out[key] = docOf(m, key, r);
   return out;
 }
 
 /** The highest stamp the records carry. */
-export function stampOf<R>(m: Model<R>, records: Records<R>): Stamp {
+export function stampOf<R>(m: Model<R, unknown>, records: Records<R>): Stamp {
   let t = 0;
   for (const [key, r] of Object.entries(records)) t = Math.max(t, kindOf(m, key)?.stamp(r) ?? 0);
   return t;
@@ -46,7 +46,7 @@ export function stampOf<R>(m: Model<R>, records: Records<R>): Stamp {
  * The app's records in a room's snapshot: its keys only, each repaired, none of a newer format. A record read from a
  * key an earlier build wrote is placed at its own.
  */
-export function recordsIn<R>(m: Model<R>, snap: Snapshot): Records<R> {
+export function recordsIn<R>(m: Model<R, unknown>, snap: Snapshot): Records<R> {
   const out: Record<string, R> = {};
   for (const [key, raw] of Object.entries(snap)) {
     const k = kindOf(m, key);
@@ -70,7 +70,7 @@ export function recordsIn<R>(m: Model<R>, snap: Snapshot): Records<R> {
 export type MergeMode = 'absorb' | 'join' | 'takeIn';
 
 /** held itself when nothing in it changed. */
-export function mergeRecords<R>(m: Model<R>, held: Records<R>, incoming: Records<R>, mode: MergeMode = 'absorb'): Records<R> {
+export function mergeRecords<R>(m: Model<R, unknown>, held: Records<R>, incoming: Records<R>, mode: MergeMode = 'absorb'): Records<R> {
   let out: Record<string, R> | null = null;
   for (const [key, r] of Object.entries(incoming)) {
     const k = homeKind(m, key);

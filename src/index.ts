@@ -11,7 +11,7 @@ export {
   ACCOUNT_KEY, DOC, FORWARD_KEY, accountDoc, accountFrom, forwardDoc, forwardFrom, isNewer, mergeAccount, mergeForward,
   type AccountDoc, type ForwardDoc,
 } from './account.js';
-export { playOrder, samePlay, type Fold, type Kind, type Model, type Playthrough, type Snapshot } from './model.js';
+export { playOrder, samePlay, type AppMeta, type Fold, type Kind, type Model, type Playthrough, type Snapshot } from './model.js';
 export { docOf, docsOf, homeKind, isLive, kindOf, mergeRecords, recordsIn, stampOf, tombstoneOf, type MergeMode, type Records } from './records.js';
 export {
   adoptAccount, editRecords, emptyStore, expire, forwardDone, importRecords, moved, oldestTombstone, purgeDone, purgeRecord, putRecord,

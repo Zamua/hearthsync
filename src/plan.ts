@@ -9,8 +9,8 @@ import type { LocalStore } from './store.js';
 
 export interface Put { room: string; key: string; value: unknown; hash: string }
 
-export interface Plan<R> {
-  store: LocalStore<R>;
+export interface Plan<R, A = undefined> {
+  store: LocalStore<R, A>;
   puts: Put[];
   /** The app's keys whose records the read changed: another device's progress. */
   news: string[];
@@ -21,42 +21,42 @@ export interface Plan<R> {
 }
 
 /** The account room as this device would have it. */
-export function accountDocs<R>(m: Model<R>, s: LocalStore<R>): Record<string, unknown> {
+export function accountDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (s.profile) out[ACCOUNT_KEY] = accountDoc(s.profile);
   return Object.assign(out, docsOf(m, s.records));
 }
 
-export function roomDocs<R>(m: Model<R>, s: LocalStore<R>, room: string): Record<string, unknown> {
+export function roomDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string): Record<string, unknown> {
   return room === s.account ? accountDocs(m, s) : {};
 }
 
 /** The ack of a key holding a newer build's doc: this build must not overwrite it, so it counts as saved. */
 export const NEWER = 'newer';
 
-const clean = <R>(s: LocalStore<R>, room: string, key: string, doc: unknown): boolean => {
+const clean = <R, A>(s: LocalStore<R, A>, room: string, key: string, doc: unknown): boolean => {
   const ack = s.acks[room]?.[key];
   return ack !== undefined && (ack === NEWER || ack === hash(doc));
 };
 
 /** Rooms to sync: the account's, once it has one. */
-export const roomsOf = <R>(s: LocalStore<R>): string[] => (s.account ? [s.account] : []);
+export const roomsOf = <R, A>(s: LocalStore<R, A>): string[] => (s.account ? [s.account] : []);
 
 /** Every doc the server has not confirmed holding, in rooms that exist. */
-export function dirty<R>(m: Model<R>, s: LocalStore<R>): Put[] {
+export function dirty<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Put[] {
   const out: Put[] = [];
   for (const room of roomsOf(s)) for (const [key, doc] of Object.entries(roomDocs(m, s, room))) if (!clean(s, room, key, doc)) out.push({ room, key, value: doc, hash: hash(doc) });
   return out;
 }
 
 /** A doc of a later format than this build writes: the manifest and forward have the library's, the rest the app's. */
-const newerDoc = <R>(m: Model<R>, key: string, raw: unknown): boolean => isNewer(raw, key === ACCOUNT_KEY || key === FORWARD_KEY ? DOC : versionOf(m));
+const newerDoc = <R, A>(m: Model<R, unknown>, key: string, raw: unknown): boolean => isNewer(raw, key === ACCOUNT_KEY || key === FORWARD_KEY ? DOC : versionOf(m));
 
 /**
  * A room's records merged in. A key this device purged is not taken back unless a use made after its tombstone
  * revived it.
  */
-function mergeIn<R>(m: Model<R>, s: LocalStore<R>, snapshot: Snapshot, mode: MergeMode): LocalStore<R> {
+function mergeIn<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snapshot, mode: MergeMode): LocalStore<R, A> {
   const incoming: Record<string, R> = {}, purge: Record<string, number> = { ...s.purge };
   for (const [key, r] of Object.entries(recordsIn(m, snapshot))) {
     if (Object.hasOwn(purge, key)) {
@@ -75,7 +75,7 @@ function mergeIn<R>(m: Model<R>, s: LocalStore<R>, snapshot: Snapshot, mode: Mer
  * Tombstones the server held (their ack is of this very doc) and no longer holds: another device purged them, so they
  * are dropped here too rather than uploaded again.
  */
-function purgedThere<R>(m: Model<R>, s: LocalStore<R>, room: string, read: Snapshot, inScope: (k: string) => boolean): LocalStore<R> {
+function purgedThere<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string, read: Snapshot, inScope: (k: string) => boolean): LocalStore<R, A> {
   const acks = s.acks[room] ?? {};
   let records = s.records;
   for (const [key, r] of Object.entries(s.records)) {
@@ -87,16 +87,16 @@ function purgedThere<R>(m: Model<R>, s: LocalStore<R>, room: string, read: Snaps
 }
 
 /** The account room's records merged in. Its manifest and forward are not. */
-export const absorbAccount = <R>(m: Model<R>, s: LocalStore<R>, snapshot: Snapshot): LocalStore<R> => mergeIn(m, s, snapshot, 'absorb');
+export const absorbAccount = <R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snapshot): LocalStore<R, A> => mergeIn(m, s, snapshot, 'absorb');
 
 /**
  * This device joins an account (a code typed, or a forward followed). Its records merge in, but where the account
  * holds another playthrough, the account's wins whole; the device's own stays behind in the room it came from.
  */
-export const joinAccount = <R>(m: Model<R>, s: LocalStore<R>, snapshot: Snapshot): LocalStore<R> => mergeIn(m, s, snapshot, 'join');
+export const joinAccount = <R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snapshot): LocalStore<R, A> => mergeIn(m, s, snapshot, 'join');
 
 /** Another account merged into this one: its records come in, but where this account holds another playthrough, it stays. */
-export const takeIn = <R>(m: Model<R>, s: LocalStore<R>, snapshot: Snapshot): LocalStore<R> => mergeIn(m, s, snapshot, 'takeIn');
+export const takeIn = <R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snapshot): LocalStore<R, A> => mergeIn(m, s, snapshot, 'takeIn');
 
 /** The keys of b whose records differ from a's. */
 export function changed<R>(a: Records<R>, b: Records<R>): string[] {
@@ -109,7 +109,7 @@ export function changed<R>(a: Records<R>, b: Records<R>): string[] {
  * is taken in only when it changed since it was last seen there (its ack), so a record deleted since does not come
  * back from it. Pure and idempotent: planning twice against the same read changes nothing more.
  */
-export function plan<R>(m: Model<R>, s: LocalStore<R>, room: string, remote: Snapshot, keys?: readonly string[]): Plan<R> {
+export function plan<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string, remote: Snapshot, keys?: readonly string[]): Plan<R, A> {
   const inScope = (k: string) => !keys || keys.includes(k);
   const read: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(remote)) if (inScope(k)) read[k] = v;
@@ -147,7 +147,7 @@ export function plan<R>(m: Model<R>, s: LocalStore<R>, room: string, remote: Sna
 }
 
 /** The server confirmed a PUT: it holds the doc with this hash (a key edited since stays dirty). */
-export function acknowledge<R>(s: LocalStore<R>, room: string, key: string, h: string): LocalStore<R> {
+export function acknowledge<R, A>(s: LocalStore<R, A>, room: string, key: string, h: string): LocalStore<R, A> {
   return { ...s, acks: { ...s.acks, [room]: { ...s.acks[room], [key]: h } } };
 }
 
@@ -161,7 +161,7 @@ export interface Chips {
   unsaved: number;
 }
 
-export function chips<R>(m: Model<R>, s: LocalStore<R>): Chips {
+export function chips<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Chips {
   const acc = s.account, items: Record<string, Chip> = {};
   let unsaved = 0;
   for (const [key, doc] of Object.entries(docsOf(m, s.records))) {

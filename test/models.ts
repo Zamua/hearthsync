@@ -1,7 +1,7 @@
 import { UNTIMED, gsetAdd, gsetList, gsetMerge, hash, isStamp, lww, lwwOpt, tick, type GSet, type Reg, type Stamp } from '../src/crdt.js';
 import { playOrder, samePlay, type AppMeta, type Fold, type Kind, type Model, type Playthrough } from '../src/model.js';
 import { gsetFrom, isMember, isObj, regFrom } from '../src/repair.js';
-import { isRoomId } from '../src/code.js';
+import { isPlace } from '../src/account.js';
 import { importRecords, putRecord, type LocalStore, type PutResult } from '../src/store.js';
 import type { Records } from '../src/records.js';
 
@@ -256,7 +256,7 @@ export const corkKind: Kind<Cork> = {
   from(raw, key) {
     const id = CORK.exec(key)?.[1];
     if (!id || !isObj(raw) || raw.id !== id) return null;
-    const room = regFrom(raw.room, isRoomId), st = (x: unknown) => (isStamp(x) ? x : 0);
+    const room = regFrom(raw.room, isPlace), st = (x: unknown) => (isStamp(x) ? x : 0);
     return { id, ...(room ? { room } : {}), title: regFrom(raw.title, isText) ?? { val: '', t: 0 }, made: st(raw.made), u: st(raw.u), left: st(raw.left), pins: gsetFrom(raw.pins), starred: gsetFrom(raw.starred) };
   },
   merge(a, b) {

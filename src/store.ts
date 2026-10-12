@@ -29,7 +29,10 @@ export interface LocalStore<R, A = undefined> {
   purge: Readonly<Record<string, Stamp>>;
   /** The app's own state, kept in the meta (`Model.meta`). */
   app: A;
-  /** The room each shared record lives in, by its key: the last move wins. */
+  /**
+   * The room each shared record lives in, by its key, or LEFT once this account left it: the last move wins. Kinds
+   * keeping the register in the record (`Kind.register`) are not here.
+   */
   shared: Regs<string>;
 }
 
@@ -214,8 +217,8 @@ export const shareRecord = <R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key
 export const leaveRoom = <R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string, now: number): LocalStore<R, A> =>
   roomOf(m, s, key) === null ? s : moveTo(m, s, [key], LEFT, now);
 
-/** Records of a retired room move to the room it forwards to; registers kept in records too, given the model. */
-export function followRoom<R, A>(s: LocalStore<R, A>, from: string, to: string, now: number, m: Model<R, unknown> = { prefix: '', salt: '', kind: () => null }): LocalStore<R, A> {
+/** Records of a retired room move to the room it forwards to. */
+export function followRoom<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, from: string, to: string, now: number): LocalStore<R, A> {
   const at = placed(m, s);
   return moveTo(m, s, Object.keys(at).filter(k => at[k]!.val === from), to, now);
 }

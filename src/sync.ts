@@ -4,7 +4,7 @@ import { canon, tick } from './crdt.js';
 import { resolveForward, tagOf } from './identity.js';
 import type { Local } from './local.js';
 import { isLive, kindOf, mergeRecords, ownsRoom, recordsIn, roomRecord, type Records } from './records.js';
-import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, type Chip, type Put } from './plan.js';
+import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, writtenOnce, type Chip, type Put } from './plan.js';
 import { RoomError, type RoomApi } from './rooms.js';
 import {
   adoptAccount, expire, followRoom, forwardDone, joinRoom, leaveRoom, oldestTombstone, placed, purgeDone, purgeRecord, queueForward, roomOf, shareRecord,
@@ -201,8 +201,9 @@ export class Sync<R, A = undefined> {
 
   stop(): void {
     this.started = false;
-    for (const h of [this.passTimer, this.debounce, this.periodic]) if (h !== null) this.env.clearTimer(h);
+    for (const h of [this.passTimer, this.debounce, this.periodic, ...this.feedTimers.values()]) if (h !== null) this.env.clearTimer(h);
     this.passTimer = this.debounce = this.periodic = null;
+    this.feedTimers.clear();
   }
 
   /** A local change: saved once changes stop for a while. */
@@ -501,8 +502,8 @@ export class Sync<R, A = undefined> {
   }
 
   private async read(room: string, full: boolean): Promise<{ remote: Snapshot; keys?: string[] } | null> {
-    const feed = this.feeds.get(room);
-    if (feed?.ready) return { remote: Object.fromEntries(feed.kv) };
+    const fed = this.fedRead(room);
+    if (fed) return fed;
     if (!full && this.env.now() - (this.scannedAt.get(room) ?? -Infinity) < FULL_EVERY) {
       const keys = dirty(this.m, this.local.store).filter(p => p.room === room).map(p => p.key);
       if (!keys.length) return null;
@@ -662,7 +663,7 @@ export class Sync<R, A = undefined> {
     const end = await this.forwardsFrom(room, remote);
     if (!end) return;
     if (end.room === room) { this.cycleHeads.add(room); return; }
-    if (room !== this.local.store.account) { this.local.edit((s, now) => followRoom(s, room, end.room, now, this.m), 'sync'); return; }
+    if (room !== this.local.store.account) { this.local.edit((s, now) => followRoom(this.m, s, room, end.room, now), 'sync'); return; }
     const prev = this.local.store;
     this.local.edit((s, now) => joinAccount(this.m, switchAccount(s, end.room, now, this.m.salt).store, end.snapshot), 'sync');
     this.tellNews(prev, this.local.store);
@@ -776,13 +777,28 @@ export class Sync<R, A = undefined> {
     this.schedule(ms);
   }
 
-  /** A round against a room's fed copy; another device's changes it brings are owed to the account room. */
+  /**
+   * A room's fed copy as a read of some of its keys: those it holds, and those this device may write that it lacks. A
+   * copy may be behind the server, so a key it lacks is never taken as gone, nor a write-once key as unwritten. None
+   * for the account room, whose reads also decide what other devices purged.
+   */
+  private fedRead(room: string): { remote: Snapshot; keys: string[] } | null {
+    const feed = this.feeds.get(room), s = this.local.store;
+    if (!feed?.ready || room === s.account) return null;
+    const remote = Object.fromEntries(feed.kv), once = writtenOnce(this.m, s, room), keys = new Set(Object.keys(remote));
+    for (const p of dirty(this.m, s)) if (p.room === room && !once(p.key)) keys.add(p.key);
+    return { remote, keys: [...keys] };
+  }
+
+  /** A round against a room's fed copy, when a pass could run; another device's changes it brings are owed to the account room. */
   private async feedRound(room: string): Promise<void> {
     await this.exclusive(async () => {
-      const feed = this.feeds.get(room);
-      if (!feed?.ready || this.gone.has(room) || this.dropped.has(room)) return;
+      const now = this.env.now();
+      if (!this.started || !this.env.online() || now < this.pausedUntil || now < this.backoffUntil || this.gone.has(room) || this.dropped.has(room)) return;
+      const fed = this.fedRead(room);
+      if (!fed) return;
       const before = this.local.store.records;
-      try { await this.apply(room, Object.fromEntries(feed.kv)); } catch (e) { this.failed(e); }
+      try { await this.apply(room, fed.remote, fed.keys); } catch (e) { this.failed(e); }
       if (room !== this.local.store.account && this.local.store.records !== before) this.changed();
     }).catch(() => {});
   }

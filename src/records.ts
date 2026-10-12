@@ -18,11 +18,11 @@ export const ownsRoom = <R>(m: Model<R, unknown>, key: string): boolean => homeK
 /** Whether the record at key keeps its room register inside itself (`Kind.register`). */
 export const keepsRegister = <R>(m: Model<R, unknown>, key: string): boolean => ownsRoom(m, key) && !!homeKind(m, key)!.register;
 
-/** The room register a record keeps inside itself. */
+/** The room register of a record whose kind keeps it inside the record; undefined for any other, or none yet. */
 export const recordRoom = <R>(m: Model<R, unknown>, key: string, r: R): Reg<string> | undefined => homeKind(m, key)?.register?.get(r);
 
 /** Whether deleting the record at key is this account leaving its room (`Kind.deletes`). */
-export const leavesOnDelete = <R>(m: Model<R, unknown>, key: string): boolean => homeKind(m, key)?.deletes === 'account';
+export const leavesOnDelete = <R>(m: Model<R, unknown>, key: string): boolean => { const k = homeKind(m, key); return !!k?.layout || k?.deletes === 'account'; };
 
 export const versionOf = <R>(m: Model<R, unknown>): number => m.version ?? DOC;
 
@@ -73,9 +73,9 @@ export function recordsIn<R>(m: Model<R, unknown>, snap: Snapshot): Records<R> {
   return out;
 }
 
-/** A shared room's snapshot without the docs this build must leave alone: a newer build's, and the forward. */
+/** A shared room's snapshot as a layout reads it: without the library's keys and a newer build's docs. */
 export function roomRead<R>(m: Model<R, unknown>, snap: Snapshot): Snapshot {
-  return Object.fromEntries(Object.entries(snap).filter(([k, v]) => k !== FORWARD_KEY && !isNewer(v, versionOf(m))));
+  return Object.fromEntries(Object.entries(snap).filter(([k, v]) => k !== FORWARD_KEY && k !== ACCOUNT_KEY && k !== SHARED_KEY && !isNewer(v, versionOf(m))));
 }
 
 /** The record at key as a shared room holds it, by its kind's layout or whole at its key; null when it holds none. */

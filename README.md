@@ -83,8 +83,9 @@ sync.on('status', st => { /* st.state, st.problem, st.code, st.items['list/groce
 
 The UI operations are `sync.peekCode(text)` (what a code holds), `sync.linkCode(text)`, `sync.mergeCode(text)`,
 `sync.remakeAccount()` (after the server lost the account room), and for shared records `sync.share(key)`,
-`sync.peek(room)`, `sync.join(room)` and `sync.leave(key)`. Each fails with a `SyncError` whose `kind` says why:
-`offline`, `code` (with the `CodeError`), `notfound`, `notaccount`, `same`, `noaccount`, `rate`, `full`, `failed`.
+`sync.peek(room)`, `sync.join(room)` and `sync.leave(key)`. Each but `leave` (which works offline and never fails)
+fails with a `SyncError` whose `kind` says why: `offline`, `code` (with the `CodeError`), `notfound`, `notaccount`,
+`same`, `noaccount`, `rate`, `full`, `failed`.
 
 ### Building blocks for records
 
@@ -153,9 +154,10 @@ await sync.join(room);                          // 'board/trip', merged in and s
 - **Leaving** (`sync.leave(key)`, offline too) stops sharing a record without deleting it: it stays, live, in the
   account room alone, its register holding `LEFT` (`''`), and the room carries on for its other members. Online, what
   this device owes the room is uploaded first. Sharing it again makes a new room; joining the old one moves it back.
-- **Deleting as leaving**: a kind with `deletes: 'account'` makes a tombstone this account's alone. It never reaches
-  the room, which keeps the record for the others, and the room leaves sync. Give such a kind `enter(r, t)`, the record
-  as joined at stamp t, so joining the room again brings it back.
+- **Deleting as leaving**: a whole-record kind with `deletes: 'account'` makes a tombstone this account's alone. It
+  never reaches the room, which keeps the record for the others, and the room leaves sync. A laid out kind (below)
+  always deletes this way. Give such a kind `enter(r, t)`, the record as joined at stamp t, so joining the room again
+  brings it back.
 - **A retired room** holds a `forward`, as an account room does: peeks and joins of an old invite land in the new
   room, and members move their record there. A room answering `404` for `LOST_GAP` is listed in the status's `gone`;
   sharing that record again makes a new room.
@@ -181,23 +183,50 @@ const cork: Kind<Cork> = {
 const model: Model<Cork> = { /* ... */ roomKey: snapshot => (isObj(snapshot.id) ? `cork/${snapshot.id.id}` : null) };
 ```
 
-- **`read`** gets the room's keys (all of them on a scan, some on a light read) without `forward` and a newer build's
-  docs; what it returns merges into this device's copy with the kind's `merge`. A layout's keys are never the app's own
-  record keys.
+- **`read`** gets the room's keys (all of them on a scan, some on a light read or a feed) without `account`, `shared`,
+  `forward` and a newer build's docs; what it returns merges into this device's copy with the kind's `merge`. A
+  layout's keys are never the app's own record keys, nor those three.
+- **`docs`** must not carry the tombstone: deleting a laid out record is always this account leaving (`deletes` is
+  for whole records).
+- **`once`** keys have no conditional PUT: two devices writing one first at once both land, and the later stays. Every
+  writer must write the same value (one derived from the record's id, say).
 - **`roomKey(snapshot, room)`** on the model finds the record a laid out room holds, for `peek` and `join`.
 - **A deleted laid out record** keeps the projection's keys (the tombstone is the account's own): its room still takes
   what the device owes it, then leaves sync.
 - **`register`** keeps the room's register in the record instead of the store's and the account room's `shared`, for
-  an app whose records already carry one; the kind's `merge` must merge it as a register (`lwwOpt`).
+  an app whose records already carry one; the kind's `merge` must merge it as a register (`lwwOpt`), and its `from`
+  must read it with `isPlace` (a room id or `LEFT`): a `from` that drops `LEFT` undoes a leave on the account's other
+  devices.
 - **Chips**: a laid out record is `saved` only once its keys are in its room too (unless that room is gone).
 
 ### Live copies of rooms, and holding the account room
 
 An app that already keeps a live copy of a shared room (a socket's) hands it over with `sync.attach(room, feed)`
 (`{ ready, kv }`; it returns the detach): while ready, rounds read it in place of scanning the room, and `sync.fed(room)`
-after it changes plans against it shortly, a burst once. `sync.hold(true)` makes passes leave the account room for
+after it changes plans against it shortly, a burst once, whenever a pass could run (started, online, not paused or
+backing off). Before `ready`, `kv` must hold every key the server holds, and after, every PUT the server took (this
+device's too). Still, a copy may be behind, so it counts as a read of the keys it holds: a key it lacks is never taken
+as gone, and a write-once key it lacks is never written. A feed of the account room is ignored, as its reads also
+decide what other devices purged. `sync.hold(true)` makes passes leave the account room for
 later while shared rooms still sync (a realtime session that should not wait on uploads); `sync.hold(false)` runs what
 waited.
+
+### Older builds on the same account
+
+Shared rooms were added in 0.2, and layouts, leaving and feeds in 0.3. A 0.2 device sees none of the 0.3 rules, so on
+an account with both:
+
+- **The `shared` doc** takes format 2 once it lists a leave (`LEFT`), which 0.2 reads as a newer build's doc and leaves
+  alone (its status says `newer`), rather than writing it back without the leave each round. It then learns of no new
+  shared rooms from the account room.
+- **A record this account left, or deleted with `deletes: 'account'`,** is still in the room as far as a 0.2 device
+  knows: it uploads the tombstone there (gone for every member) and carries later private edits into the room.
+- **A laid out record** is read by 0.2 as a whole record its room never holds: peeks and joins of it fail.
+
+So a model whose kinds adopt `layout`, `deletes: 'account'` or `Sync.leave` should take a new `Model.version` (it
+covers every kind's docs, and a layout's docs should carry it too): older builds then read those docs as a newer
+build's and leave them alone, as for any format change. Bump it only once the new build is
+what devices run, or a phone still on the old build stops syncing those records until it updates.
 
 ### Keys an earlier build wrote
 

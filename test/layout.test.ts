@@ -3,7 +3,7 @@ import { codeFromRoom } from '../src/code.js';
 import { canon, hash, lww, type Reg } from '../src/crdt.js';
 import { makeRng } from '../src/rng.js';
 import { acknowledge, chips, dirty, plan, roomDocs, roomsOf, type Plan } from '../src/plan.js';
-import { adoptAccount, emptyStore, joinRoom, placed, shareRecord, type LocalStore } from '../src/store.js';
+import { adoptAccount, emptyStore, joinRoom, leaveRoom, placed, roomOf, shareRecord, type LocalStore } from '../src/store.js';
 import type { SyncError } from '../src/sync.js';
 import { device, fakeWorld, type Device, type FakeRooms, type TestClock } from '../src/testing/index.js';
 import {
@@ -283,7 +283,7 @@ describe('chips of a laid out record', () => {
   });
 });
 
-describe('random histories of two accounts pinning to a laid out corkboard converge', () => {
+describe('random histories of two accounts pinning to a laid out corkboard, leaving and joining again, converge', () => {
   type Server = Map<string, Map<string, unknown>>;
   const snap = (srv: Server, room: string): Record<string, unknown> => Object.fromEntries(srv.get(room) ?? []);
   const RA = '11111111-2222-4333-8444-555555555555', RB = '22222222-2222-4333-8444-555555555555', RS = '33333333-2222-4333-8444-555555555555';
@@ -305,6 +305,15 @@ describe('random histories of two accounts pinning to a laid out corkboard conve
       moved += p.puts.length + p.news.length;
     }
     return moved;
+  }
+
+  /** Back in the room: joined again from what it holds now, unless already there and live. */
+  function rejoin(d: { s: LocalStore<Cork> }, srv: Server, now: number): void {
+    const r = d.s.records[C1];
+    if (r && roomOf(corks, d.s, C1) === RS && r.left <= r.u) return;
+    const j = joinRoom(corks, d.s, RS, snap(srv, RS), now);
+    if (typeof j === 'string') throw new Error(j);
+    d.s = j.store;
   }
 
   it('no pin is lost, the title is the last edit made, the room holds what each device would, and each account keeps its own', () => {
@@ -334,8 +343,14 @@ describe('random histories of two accounts pinning to a laid out corkboard conve
           const px = plan(corks, x.s, RS, read), py = plan(corks, y.s, RS, read);
           x.s = push(srv, px);
           y.s = push(srv, py);
-        } else rounds(d, srv);
+        } else if (op === 6) {
+          if (!d.s.records[C1]) continue;
+          d.s = rng.next() < 0.5 ? leaveRoom(corks, d.s, C1, now + d.skew) : leaveCork(d.s, 'c1', now + d.skew);
+        } else if (op === 7) rejoin(d, srv, now + d.skew);
+        else rounds(d, srv);
       }
+      for (const d of ds) rounds(d, srv);
+      for (const d of ds) rejoin(d, srv, now + 100);
       let quiet = false;
       for (let pass = 0; pass < 12 && !quiet; pass++) quiet = ds.reduce((n, d) => n + rounds(d, srv), 0) === 0;
       expect(quiet).toBe(true);

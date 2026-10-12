@@ -8,7 +8,7 @@ export {
 } from './crdt.js';
 export { MAX_MEMBERS, gsetFrom, isMember, isObj, isPid, regFrom, regsFrom, winFrom, winsFrom, type Obj } from './repair.js';
 export {
-  ACCOUNT_KEY, DOC, FORWARD_KEY, LEFT, SHARED_KEY, accountDoc, accountFrom, forwardDoc, forwardFrom, isNewer, mergeAccount, mergeForward,
+  ACCOUNT_KEY, DOC, FORWARD_KEY, LEFT, SHARED_KEY, SHARED_LEFT, accountDoc, accountFrom, forwardDoc, forwardFrom, isNewer, isPlace, mergeAccount, mergeForward,
   sharedDoc, sharedFrom, sharedRegs, type AccountDoc, type ForwardDoc,
 } from './account.js';
 export { playOrder, samePlay, type AppMeta, type Fold, type Kind, type Model, type Playthrough, type RoomLayout, type Snapshot } from './model.js';
@@ -21,7 +21,7 @@ export {
   purgeRecord, putRecord, queueForward, roomFor, roomOf, shareRecord, sharedKey, sharedStamp, switchAccount, type Acks, type LocalStore, type PutResult,
 } from './store.js';
 export {
-  NEWER, absorbAccount, accountDocs, acknowledge, changed, chips, dirty, joinAccount, plan, roomDocs, roomsOf, takeIn,
+  NEWER, absorbAccount, accountDocs, acknowledge, changed, chips, dirty, joinAccount, plan, roomDocs, roomsOf, takeIn, writtenOnce,
   type Chip, type Chips, type Plan, type Put,
 } from './plan.js';
 export { RoomError, httpRooms, type HttpDeps, type RoomApi } from './rooms.js';

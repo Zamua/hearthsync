@@ -1,4 +1,4 @@
-import { ACCOUNT_KEY, DOC, FORWARD_KEY, SHARED_KEY, accountDoc, accountFrom, forwardFrom, isNewer, mergeAccount, sharedDoc, sharedFrom } from './account.js';
+import { ACCOUNT_KEY, DOC, FORWARD_KEY, SHARED_KEY, SHARED_LEFT, accountDoc, accountFrom, forwardFrom, isNewer, mergeAccount, sharedDoc, sharedFrom } from './account.js';
 import { canon, hash, regsMerge } from './crdt.js';
 import type { Model, Snapshot } from './model.js';
 import {
@@ -50,7 +50,7 @@ function sharedDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: strin
 }
 
 /** Whether a key of the room is one its records' layouts write once; never in the account room. */
-function onceOf<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string): (key: string) => boolean {
+export function writtenOnce<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string): (key: string) => boolean {
   if (room === s.account) return () => false;
   const layouts = Object.keys(placed(m, s)).filter(k => roomOf(m, s, k) === room).map(k => homeKind(m, k)!.layout?.once).filter(f => !!f);
   return key => layouts.some(f => f(key));
@@ -71,7 +71,7 @@ const clean = <R, A>(s: LocalStore<R, A>, room: string, key: string, doc: unknow
 
 /** Whether a laid out record's keys are all saved in its room. */
 function laidClean<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string, room: string): boolean {
-  const once = onceOf(m, s, room);
+  const once = writtenOnce(m, s, room);
   return Object.entries(homeKind(m, key)!.layout!.docs(s.records[key]!)).every(([k, d]) => clean(s, room, k, d, once(k)));
 }
 
@@ -99,14 +99,14 @@ export function roomsOf<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): string
 export function dirty<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Put[] {
   const out: Put[] = [];
   for (const room of roomsOf(m, s)) {
-    const once = onceOf(m, s, room);
+    const once = writtenOnce(m, s, room);
     for (const [key, doc] of Object.entries(roomDocs(m, s, room))) if (!clean(s, room, key, doc, once(key))) out.push({ room, key, value: doc, hash: hash(doc) });
   }
   return out;
 }
 
 /** A doc of a later format than this build writes: the manifest and forward have the library's, the rest the app's. */
-const newerDoc = <R, A>(m: Model<R, unknown>, key: string, raw: unknown): boolean => isNewer(raw, key === ACCOUNT_KEY || key === SHARED_KEY || key === FORWARD_KEY ? DOC : versionOf(m));
+const newerDoc = <R, A>(m: Model<R, unknown>, key: string, raw: unknown): boolean => isNewer(raw, key === SHARED_KEY ? SHARED_LEFT : key === ACCOUNT_KEY || key === FORWARD_KEY ? DOC : versionOf(m));
 
 /**
  * A room's records, and the rooms of its shared ones, merged in. A key this device purged is not taken back unless a
@@ -212,7 +212,7 @@ export function plan<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: stri
   const clock = Math.max(next.clock, stampOf(m, next.records), sharedStamp(next.shared));
 
   const acks: Record<string, string> = { ...(next.acks[room] ?? {}) }, puts: Put[] = [];
-  const docs = roomDocs(m, next, room), once = onceOf(m, next, room);
+  const docs = roomDocs(m, next, room), once = writtenOnce(m, next, room);
   for (const key of Object.keys(read)) if (!(key in docs) && !newer.includes(key)) delete acks[key];
   for (const key of Object.keys(acks)) if (inScope(key) && !(key in docs) && !(key in read)) delete acks[key];
   if (room === s.account) for (const key of legacy) acks[key] = hash(read[key]);

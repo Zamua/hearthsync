@@ -337,7 +337,7 @@ describe('the plan for a shared room', () => {
     const f = plan(boards, p.store, RS, { forward: { v: 1, to: RS2, at: 5 } });
     expect(f.forward).toBe(RS2);
     expect(f.puts).toEqual([]);
-    const moved = followRoom(f.store, RS, RS2, 1200);
+    const moved = followRoom(boards, f.store, RS, RS2, 1200);
     expect(roomDocs(boards, moved, RS)).toEqual({});
     expect(Object.keys(roomDocs(boards, moved, RS2))).toEqual([B1]);
   });

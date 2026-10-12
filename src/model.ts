@@ -15,7 +15,10 @@ export const samePlay = (a: Playthrough, b: Playthrough): boolean => a.run === b
 /** The later run, then the larger id. */
 export const playOrder = (a: Playthrough, b: Playthrough): number => a.run - b.run || (a.game < b.game ? -1 : a.game > b.game ? 1 : 0);
 
-/** One kind of record: each lives at its own room key, and merges on its own. */
+/**
+ * One kind of record: each lives at its own key in the account room (and, if shared, in a room of its own, whole or
+ * by its layout), and merges on its own.
+ */
 export interface Kind<R> {
   /** The record a doc holds, repaired; null when it is not one. key is where it was read from. */
   from(raw: unknown, key: string): R | null;
@@ -55,9 +58,10 @@ export interface Kind<R> {
    */
   room?: 'account' | 'own';
   /**
-   * For a kind with `room: 'own'` and `life`: 'account' makes deleting the record this account leaving its room, which
-   * keeps the record for its other members; the tombstone never reaches it. 'room' (the default): the tombstone reaches
-   * the room, so the record is gone for every member.
+   * For a whole-record kind with `room: 'own'` and `life`: 'account' makes deleting the record this account leaving
+   * its room, which keeps the record for its other members; the tombstone never reaches it. 'room' (the default): the
+   * tombstone reaches the room, so the record is gone for every member. A kind with a layout always leaves: its room
+   * holds what the layout projects, which must not carry the tombstone. Builds before this ignore it: see the README.
    */
   deletes?: 'room' | 'account';
   /**
@@ -70,7 +74,7 @@ export interface Kind<R> {
   /**
    * Keeps the register of the room a shared record lives in inside the record itself (an app whose records already
    * carry one), instead of in the store's and the account room's `shared`. The kind's merge must merge it as a register,
-   * and its `from` keep a register holding LEFT if the app calls `Sync.leave`.
+   * and its `from` must read it with `isPlace`, keeping LEFT: dropping it undoes a leave on the account's other devices.
    */
   register?: { get(r: R): Reg<string> | undefined; set(r: R, reg: Reg<string>): R };
 }
@@ -78,8 +82,8 @@ export interface Kind<R> {
 /**
  * A shared record laid out over several keys of its room: one per field, one per entry added, so members writing at
  * once never overwrite each other's keys. Fields the account keeps to itself are left out, and so is its tombstone:
- * deleting is this account leaving (`deletes: 'account'`), and a deleted record still takes what it owes its room
- * before it leaves sync. A layout's keys are never the app's own record keys, nor `forward`.
+ * deleting is always this account leaving, and a deleted record still takes what it owes its room before it leaves
+ * sync. A layout's keys are never the app's own record keys, nor `account`, `shared` or `forward`.
  */
 export interface RoomLayout<R> {
   /** The keys the room holds for the record, each with its doc, in the order to write them. */
@@ -89,7 +93,11 @@ export interface RoomLayout<R> {
    * keys only, so it reads whatever is there; the result merges into this device's copy with the kind's merge.
    */
   read(snapshot: Snapshot, key: string): R | null;
-  /** Keys written once (an id, a creation time): any value the server holds counts as saved and is never written over. */
+  /**
+   * Keys written once (an id, a creation time): any value the server holds counts as saved and is never written over.
+   * There is no conditional PUT, so two first writers both land and the later one stays: every writer must write the
+   * same value (one derived from the record's id, say).
+   */
   once?(key: string): boolean;
   /** Whether a deleted record this device never uploaded to its room still owes it its keys; true by default. */
   owes?(r: R): boolean;

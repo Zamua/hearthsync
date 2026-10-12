@@ -3,12 +3,12 @@ import { codeFromRoom, isRoomId, parseCode, type CodeError } from './code.js';
 import { canon, tick } from './crdt.js';
 import { resolveForward, tagOf } from './identity.js';
 import type { Local } from './local.js';
-import { isLive, kindOf, mergeRecords, ownsRoom, recordsIn, type Records } from './records.js';
-import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, type Chip, type Put } from './plan.js';
+import { isLive, kindOf, mergeRecords, ownsRoom, recordsIn, roomRecord, type Records } from './records.js';
+import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, writtenOnce, type Chip, type Put } from './plan.js';
 import { RoomError, type RoomApi } from './rooms.js';
 import {
-  adoptAccount, expire, followRoom, forwardDone, joinRoom, oldestTombstone, purgeDone, purgeRecord, queueForward, shareRecord, sharedKey, switchAccount,
-  type LocalStore,
+  adoptAccount, expire, followRoom, forwardDone, joinRoom, leaveRoom, oldestTombstone, placed, purgeDone, purgeRecord, queueForward, roomOf, shareRecord,
+  sharedKey, switchAccount, type LocalStore,
 } from './store.js';
 
 // The sync engine: the device's store, its account room and the rooms of its shared records, reconciled in the
@@ -40,6 +40,8 @@ const FAILING = 3;
 const BACKLOG = 2 * 60_000;
 /** Browsers cap the bodies of keepalive requests in flight (64 KiB). */
 const KEEPALIVE_BYTES = 60_000;
+/** A burst of changes to a fed room's copy is planned once, this long after the first. */
+const FEED_DELAY = 150;
 
 export type ItemChip = Chip | 'failed';
 export type SyncState = 'offline' | 'syncing' | 'saved' | 'error';
@@ -101,6 +103,9 @@ export interface SyncEnv {
   visible(): boolean;
 }
 
+/** A live copy of a room the app keeps (a socket's), read instead of scanning the room once it is ready. */
+export interface Feed { readonly ready: boolean; readonly kv: ReadonlyMap<string, unknown> }
+
 /** Runs fn while no other tab syncs. */
 export type SyncLock = <T>(fn: () => Promise<T>) => Promise<T>;
 
@@ -153,6 +158,11 @@ export class Sync<R, A = undefined> {
   private shown = '';
   private refreshQueued = false;
   private refreshedAt = -Infinity;
+  private feeds = new Map<string, Feed>();
+  private feedTimers = new Map<string, unknown>();
+  private held = false;
+  /** An account round was passed over while held. */
+  private deferred = false;
 
   constructor(private local: Local<R, A>, private api: RoomApi, private env: SyncEnv, private lock: SyncLock = fn => fn()) {
     local.on((_next, _prev, source) => {
@@ -191,8 +201,9 @@ export class Sync<R, A = undefined> {
 
   stop(): void {
     this.started = false;
-    for (const h of [this.passTimer, this.debounce, this.periodic]) if (h !== null) this.env.clearTimer(h);
+    for (const h of [this.passTimer, this.debounce, this.periodic, ...this.feedTimers.values()]) if (h !== null) this.env.clearTimer(h);
     this.passTimer = this.debounce = this.periodic = null;
+    this.feedTimers.clear();
   }
 
   /** A local change: saved once changes stop for a while. */
@@ -231,6 +242,28 @@ export class Sync<R, A = undefined> {
     this.schedule(0, away >= AWAY);
   }
 
+  /**
+   * While on, passes leave the account room for later (shared rooms still sync), so a realtime session is not slowed
+   * by its uploads; turning it off runs what waited.
+   */
+  hold(on: boolean): void {
+    if (on === this.held) return;
+    this.held = on;
+    if (!on && this.deferred) { this.deferred = false; this.schedule(0); }
+  }
+
+  /** A live copy of a room, read in place of scans while it is ready. Returns the detach. */
+  attach(room: string, feed: Feed): () => void {
+    this.feeds.set(room, feed);
+    return () => { if (this.feeds.get(room) === feed) this.feeds.delete(room); };
+  }
+
+  /** The fed copy of a room changed (its first snapshot, or a write): it is planned against shortly, a burst once. */
+  fed(room: string): void {
+    if (this.feedTimers.has(room)) return;
+    this.feedTimers.set(room, this.env.setTimer(() => { this.feedTimers.delete(room); void this.feedRound(room); }, FEED_DELAY));
+  }
+
   /** One pass now, after anything queued; resolves when it is done. */
   sync(o: { full?: boolean } = {}): Promise<void> {
     const full = this.wantFull || !!o.full;
@@ -260,7 +293,7 @@ export class Sync<R, A = undefined> {
       this.local.reload();
       const s = this.local.store, r = s.records[key];
       if (r === undefined || !ownsRoom(this.m, key) || !isLive(this.m, key, r)) throw new SyncError('notfound');
-      let room = s.shared[key]?.val;
+      let room = roomOf(this.m, s, key);
       if (!room || this.gone.has(room) || this.dropped.has(room)) {
         const made = await this.api.create();
         this.local.edit((st, now) => shareRecord(this.m, st, key, made, now), 'sync');
@@ -281,8 +314,8 @@ export class Sync<R, A = undefined> {
     try {
       return await this.op(async () => {
         const w = await this.readShared(room);
-        const theirs = recordsIn(this.m, w.snapshot), mine = this.local.store.records[w.key];
-        const record = mine === undefined ? theirs[w.key]! : mergeRecords(this.m, { [w.key]: mine }, theirs)[w.key]!;
+        const theirs = roomRecord(this.m, w.snapshot, w.key)!, mine = this.local.store.records[w.key];
+        const record = mine === undefined ? theirs : mergeRecords(this.m, { [w.key]: mine }, { [w.key]: theirs })[w.key]!;
         return { key: w.key, room: w.room, record };
       });
     } catch (e) {
@@ -314,6 +347,19 @@ export class Sync<R, A = undefined> {
       if (known && e instanceof SyncError && e.kind === 'offline') return known.key;
       throw e;
     }
+  }
+
+  /**
+   * This account stops sharing the record at key, keeping it, live, to itself; the room and its other members carry on
+   * without it. Online, what this device owes the room is uploaded first. Works offline.
+   */
+  async leave(key: string): Promise<void> {
+    this.local.reload();
+    const room = roomOf(this.m, this.local.store, key);
+    if (room === null) return;
+    if (this.env.online()) await this.op(() => this.settle(room)).catch(() => {});
+    this.local.edit((s, now) => leaveRoom(this.m, s, key, now), 'sync');
+    this.changed();
   }
 
   /** What is saved under a code, for the question before linking or merging. */
@@ -439,9 +485,14 @@ export class Sync<R, A = undefined> {
     if (keys.length && !this.madeAccount) this.emit('backlog', { keys, at: this.env.now() });
   }
 
-  /** The account room first, then shared ones; none the server refuses, nor one gone. */
+  /** The account room first (unless held), then shared ones; none the server refuses, nor one gone. */
   private next(done: ReadonlySet<string>): string | null {
-    return roomsOf(this.m, this.local.store).find(r => !done.has(r) && !this.dropped.has(r) && !this.gone.has(r)) ?? null;
+    const acc = this.local.store.account;
+    return roomsOf(this.m, this.local.store).find(r => {
+      if (done.has(r) || this.dropped.has(r) || this.gone.has(r)) return false;
+      if (r === acc && this.held) { this.deferred = true; return false; }
+      return true;
+    }) ?? null;
   }
 
   /** Reads, merges and uploads one room: whether anything moved. */
@@ -451,6 +502,8 @@ export class Sync<R, A = undefined> {
   }
 
   private async read(room: string, full: boolean): Promise<{ remote: Snapshot; keys?: string[] } | null> {
+    const fed = this.fedRead(room);
+    if (fed) return fed;
     if (!full && this.env.now() - (this.scannedAt.get(room) ?? -Infinity) < FULL_EVERY) {
       const keys = dirty(this.m, this.local.store).filter(p => p.room === room).map(p => p.key);
       if (!keys.length) return null;
@@ -610,7 +663,7 @@ export class Sync<R, A = undefined> {
     const end = await this.forwardsFrom(room, remote);
     if (!end) return;
     if (end.room === room) { this.cycleHeads.add(room); return; }
-    if (room !== this.local.store.account) { this.local.edit((s, now) => followRoom(s, room, end.room, now), 'sync'); return; }
+    if (room !== this.local.store.account) { this.local.edit((s, now) => followRoom(this.m, s, room, end.room, now), 'sync'); return; }
     const prev = this.local.store;
     this.local.edit((s, now) => joinAccount(this.m, switchAccount(s, end.room, now, this.m.salt).store, end.snapshot), 'sync');
     this.tellNews(prev, this.local.store);
@@ -644,7 +697,7 @@ export class Sync<R, A = undefined> {
    * before then still writes it.
    */
   private async writeForwards(): Promise<void> {
-    const s = this.local.store, rooms = new Set(Object.values(s.shared).map(r => r.val));
+    const s = this.local.store, rooms = new Set(Object.values(placed(this.m, s)).map(r => r.val));
     for (const [from, owed] of Object.entries(s.forwards)) {
       const to = rooms.has(owed) ? owed : s.account;
       if (!to || this.unsaved(to)) continue;
@@ -724,6 +777,36 @@ export class Sync<R, A = undefined> {
     this.schedule(ms);
   }
 
+  /**
+   * A room's fed copy as a read of some of its keys: those it holds, and those this device may write that it lacks. A
+   * copy may be behind the server, so a key it lacks is never taken as gone, nor a write-once key as unwritten. None
+   * for the account room, whose reads also decide what other devices purged, nor while a write-once key this device
+   * owes the room is missing from it: that round reads the server.
+   */
+  private fedRead(room: string): { remote: Snapshot; keys: string[] } | null {
+    const feed = this.feeds.get(room), s = this.local.store;
+    if (!feed?.ready || room === s.account) return null;
+    const remote = Object.fromEntries(feed.kv), once = writtenOnce(this.m, s, room), keys = new Set(Object.keys(remote));
+    for (const p of dirty(this.m, s)) {
+      if (p.room !== room) continue;
+      if (!once(p.key)) keys.add(p.key);
+      else if (!feed.kv.has(p.key)) return null;
+    }
+    return { remote, keys: [...keys] };
+  }
+
+  /** A round against a room's fed copy, when a pass could run; another device's changes it brings are owed to the account room. */
+  private async feedRound(room: string): Promise<void> {
+    await this.exclusive(async () => {
+      const now = this.env.now();
+      if (!this.started || !this.env.online() || now < this.pausedUntil || now < this.backoffUntil || this.gone.has(room) || this.dropped.has(room)) return;
+      if (!this.feeds.get(room)?.ready || room === this.local.store.account) return;
+      const fed = this.fedRead(room), before = this.local.store.records;
+      try { await (fed ? this.apply(room, fed.remote, fed.keys) : this.round(room, false)); } catch (e) { this.failed(e); }
+      if (room !== this.local.store.account && this.local.store.records !== before) this.changed();
+    }).catch(() => {});
+  }
+
   /** Dirty docs, sent without reading first, as keepalive requests the browser finishes after the page is gone. */
   private async flush(): Promise<void> {
     if (!this.env.online() || this.env.now() < this.pausedUntil) return;
@@ -770,14 +853,14 @@ export class Sync<R, A = undefined> {
   private async readShared(room: string): Promise<{ room: string; key: string; snapshot: Snapshot }> {
     if (!isRoomId(room)) throw new SyncError('notfound');
     const end = await this.forwardsFrom(room, await this.scanRoom(room));
-    const key = end && sharedKey(this.m, end.snapshot);
+    const key = end && sharedKey(this.m, end.snapshot, end.room);
     if (!end || !key) throw new SyncError('notfound');
     return { ...end, key };
   }
 
   /** The shared record this device holds in a room. */
   private byRoom(room: string): Shared<R> | null {
-    const s = this.local.store, key = Object.keys(s.shared).find(k => s.shared[k]!.val === room && s.records[k] !== undefined);
+    const s = this.local.store, key = Object.keys(placed(this.m, s)).find(k => roomOf(this.m, s, k) === room);
     return key === undefined ? null : { key, room, record: s.records[key]! };
   }
 
@@ -834,7 +917,7 @@ export class Sync<R, A = undefined> {
   }
 
   private compute(): SyncStatus {
-    const s = this.local.store, problem = this.problem(), c = chips(this.m, s);
+    const s = this.local.store, problem = this.problem(), c = chips(this.m, s, r => this.gone.has(r) || this.dropped.has(r));
     const failing = problem === 'failing' || problem === 'full' || problem === 'lost';
     const items = Object.fromEntries(Object.entries(c.items).map(([k, chip]): [string, ItemChip] => [k, failing && s.account && chip !== 'saved' ? 'failed' : chip]));
     const online = this.env.online() && !this.netDown;
@@ -846,7 +929,7 @@ export class Sync<R, A = undefined> {
       items, unsaved: c.unsaved,
       savedAt: this.savedAt, newer: this.newer || this.local.newer,
       retryAt: problem === 'rate' ? this.createBlockedUntil : null,
-      gone: Object.keys(s.shared).filter(k => this.gone.has(s.shared[k]!.val) && s.records[k] !== undefined).sort(),
+      gone: Object.keys(placed(this.m, s)).filter(k => { const r = roomOf(this.m, s, k); return r !== null && this.gone.has(r); }).sort(),
     };
   }
 }

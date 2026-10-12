@@ -38,18 +38,29 @@ export function mergeForward(a: ForwardDoc, b: ForwardDoc): ForwardDoc {
   return a.to <= b.to ? a : b;
 }
 
-/** Each shared record's room, by its key, from untrusted JSON: only keys ok passes. */
+/** A shared record's room register once this account left the room, keeping the record to itself (`Sync.leave`). */
+export const LEFT = '';
+/** A room register's value: a room id, or LEFT. A kind keeping its register in the record reads it with this. */
+export const isPlace = (x: unknown): x is string => x === LEFT || isRoomId(x);
+
+/**
+ * The format of the `shared` doc once it holds a LEFT: builds before leaving read it as a newer build's and leave it
+ * alone, rather than writing it back without the leave on every round.
+ */
+export const SHARED_LEFT = 2;
+
+/** Each shared record's room (or LEFT), by its key, from untrusted JSON: only keys ok passes. */
 export function sharedRegs(raw: unknown, ok: (key: string) => boolean): Regs<string> {
   if (!isObj(raw)) return {};
   const out: Record<string, Reg<string>> = {};
-  for (const [k, v] of Object.entries(raw).slice(0, MAX_MEMBERS)) { const r = regFrom(v, isRoomId); if (r && ok(k)) out[k] = r; }
+  for (const [k, v] of Object.entries(raw).slice(0, MAX_MEMBERS)) { const r = regFrom(v, isPlace); if (r && ok(k)) out[k] = r; }
   return regsMerge({}, out);
 }
 
 /** The shared rooms an account room lists; none from a newer build's doc. */
 export const sharedFrom = (raw: unknown, ok: (key: string) => boolean): Regs<string> =>
-  isObj(raw) && !isNewer(raw) ? sharedRegs(raw.rooms, ok) : {};
+  isObj(raw) && !isNewer(raw, SHARED_LEFT) ? sharedRegs(raw.rooms, ok) : {};
 
 export const accountDoc = (a: AccountDoc) => ({ v: DOC, ...a });
 export const forwardDoc = (to: string, at: Stamp) => ({ v: DOC, to, at });
-export const sharedDoc = (rooms: Regs<string>) => ({ v: DOC, rooms });
+export const sharedDoc = (rooms: Regs<string>) => ({ v: Object.values(rooms).some(r => r.val === LEFT) ? SHARED_LEFT : DOC, rooms });

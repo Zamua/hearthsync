@@ -1,8 +1,11 @@
-import { ACCOUNT_KEY, DOC, FORWARD_KEY, SHARED_KEY, accountDoc, accountFrom, forwardFrom, isNewer, mergeAccount, sharedDoc, sharedFrom } from './account.js';
+import { ACCOUNT_KEY, DOC, FORWARD_KEY, SHARED_KEY, SHARED_LEFT, accountDoc, accountFrom, forwardFrom, isNewer, mergeAccount, sharedDoc, sharedFrom } from './account.js';
 import { canon, hash, regsMerge } from './crdt.js';
 import type { Model, Snapshot } from './model.js';
-import { docOf, docsOf, isLive, kindOf, mergeRecords, ownsRoom, recordsIn, stampOf, tombstoneOf, versionOf, type MergeMode, type Records } from './records.js';
-import { sharedStamp, type LocalStore } from './store.js';
+import {
+  docOf, docsOf, homeKind, isLive, keepsRegister, kindOf, leavesOnDelete, mergeRecords, ownsRoom, recordsIn, roomRead, stampOf, tombstoneOf, versionOf,
+  type MergeMode, type Records,
+} from './records.js';
+import { placed, roomOf, sharedStamp, type LocalStore } from './store.js';
 
 // Sync as data: what each room should hold (the projection), what the server has not confirmed (the derived outbox),
 // and one round's merge of a read into the store (the plan). The engine only fetches, PUTs and acknowledges. Rooms are
@@ -31,14 +34,26 @@ export function accountDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Re
   return out;
 }
 
-/** A shared room as this device would have it: the docs of the records living there. */
+/**
+ * A shared room as this device would have it: the docs of the records living there, laid out by their kind's layout,
+ * else whole at their keys. A whole record this account deleted by leaving (`deletes: 'account'`) gives it nothing.
+ */
 function sharedDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [key, reg] of Object.entries(s.shared)) {
-    const r = s.records[key];
-    if (reg.val === room && r !== undefined && ownsRoom(m, key)) out[key] = docOf(m, key, r);
+  for (const key of Object.keys(placed(m, s))) {
+    if (roomOf(m, s, key) !== room) continue;
+    const r = s.records[key]!, layout = homeKind(m, key)!.layout;
+    if (layout) Object.assign(out, layout.docs(r));
+    else if (isLive(m, key, r) || !leavesOnDelete(m, key)) out[key] = docOf(m, key, r);
   }
   return out;
+}
+
+/** Whether a key of the room is one its records' layouts write once; never in the account room. */
+export function writtenOnce<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string): (key: string) => boolean {
+  if (room === s.account) return () => false;
+  const layouts = Object.keys(placed(m, s)).filter(k => roomOf(m, s, k) === room).map(k => homeKind(m, k)!.layout?.once).filter(f => !!f);
+  return key => layouts.some(f => f(key));
 }
 
 export function roomDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string): Record<string, unknown> {
@@ -48,21 +63,34 @@ export function roomDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: 
 /** The ack of a key holding a newer build's doc: this build must not overwrite it, so it counts as saved. */
 export const NEWER = 'newer';
 
-const clean = <R, A>(s: LocalStore<R, A>, room: string, key: string, doc: unknown): boolean => {
+/** Saved: the server holds this doc, or any doc at a key written once. */
+const clean = <R, A>(s: LocalStore<R, A>, room: string, key: string, doc: unknown, once = false): boolean => {
   const ack = s.acks[room]?.[key];
-  return ack !== undefined && (ack === NEWER || ack === hash(doc));
+  return ack !== undefined && (ack === NEWER || once || ack === hash(doc));
 };
 
+/** Whether a laid out record's keys are all saved in its room. */
+function laidClean<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string, room: string): boolean {
+  const once = writtenOnce(m, s, room);
+  return Object.entries(homeKind(m, key)!.layout!.docs(s.records[key]!)).every(([k, d]) => clean(s, room, k, d, once(k)));
+}
+
 /**
- * Rooms to sync: the account's, once it has one, then each shared record's while it is live (or its tombstone has not
- * reached its room yet).
+ * Rooms to sync: the account's, once it has one, then each shared record's while it is live, or while it is deleted
+ * and owes its room what it has not uploaded there: a whole record its tombstone (unless deleting is leaving), a laid
+ * out one its keys (unless it owes the room nothing and never uploaded to it).
  */
 export function roomsOf<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): string[] {
   const out = new Set(s.account ? [s.account] : []);
-  for (const [key, { val: room }] of Object.entries(s.shared)) {
-    const r = s.records[key];
-    if (r === undefined || out.has(room) || !ownsRoom(m, key)) continue;
-    if (isLive(m, key, r) || !clean(s, room, key, docOf(m, key, r))) out.add(room);
+  for (const key of Object.keys(placed(m, s))) {
+    const room = roomOf(m, s, key);
+    if (room === null || out.has(room)) continue;
+    const r = s.records[key]!, layout = homeKind(m, key)!.layout;
+    if (isLive(m, key, r)) out.add(room);
+    else if (layout) {
+      const uploaded = Object.keys(s.acks[room] ?? {}).length > 0;
+      if ((uploaded || layout.owes?.(r) !== false) && !laidClean(m, s, key, room)) out.add(room);
+    } else if (!leavesOnDelete(m, key) && !clean(s, room, key, docOf(m, key, r))) out.add(room);
   }
   return [...out];
 }
@@ -70,12 +98,15 @@ export function roomsOf<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): string
 /** Every doc the server has not confirmed holding, in rooms that exist. */
 export function dirty<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Put[] {
   const out: Put[] = [];
-  for (const room of roomsOf(m, s)) for (const [key, doc] of Object.entries(roomDocs(m, s, room))) if (!clean(s, room, key, doc)) out.push({ room, key, value: doc, hash: hash(doc) });
+  for (const room of roomsOf(m, s)) {
+    const once = writtenOnce(m, s, room);
+    for (const [key, doc] of Object.entries(roomDocs(m, s, room))) if (!clean(s, room, key, doc, once(key))) out.push({ room, key, value: doc, hash: hash(doc) });
+  }
   return out;
 }
 
 /** A doc of a later format than this build writes: the manifest and forward have the library's, the rest the app's. */
-const newerDoc = <R, A>(m: Model<R, unknown>, key: string, raw: unknown): boolean => isNewer(raw, key === ACCOUNT_KEY || key === SHARED_KEY || key === FORWARD_KEY ? DOC : versionOf(m));
+const newerDoc = <R, A>(m: Model<R, unknown>, key: string, raw: unknown): boolean => isNewer(raw, key === SHARED_KEY ? SHARED_LEFT : key === ACCOUNT_KEY || key === FORWARD_KEY ? DOC : versionOf(m));
 
 /**
  * A room's records, and the rooms of its shared ones, merged in. A key this device purged is not taken back unless a
@@ -83,9 +114,12 @@ const newerDoc = <R, A>(m: Model<R, unknown>, key: string, raw: unknown): boolea
  * read moves a record this device uploaded out of its room (two devices shared it at once, say), that room is owed a
  * forward to the one that won.
  */
-function mergeIn<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snapshot, mode: MergeMode, inScope: (k: string) => boolean = () => true): LocalStore<R, A> {
+function mergeIn<R, A>(
+  m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snapshot, mode: MergeMode, inScope: (k: string) => boolean = () => true,
+  read: Records<R> = recordsIn(m, snapshot),
+): LocalStore<R, A> {
   const incoming: Record<string, R> = {}, purge: Record<string, number> = { ...s.purge };
-  for (const [key, r] of Object.entries(recordsIn(m, snapshot))) {
+  for (const [key, r] of Object.entries(read)) {
     if (Object.hasOwn(purge, key)) {
       const used = kindOf(m, key)?.life?.(r).used ?? 0;
       if (used <= purge[key]!) continue;
@@ -94,13 +128,15 @@ function mergeIn<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, snapshot: Snap
     incoming[key] = r;
   }
   const records = mergeRecords(m, s.records, incoming, mode), revived = Object.keys(purge).length !== Object.keys(s.purge).length;
-  const merged = regsMerge(s.shared, sharedFrom(snapshot[SHARED_KEY], k => ownsRoom(m, k)));
+  const merged = regsMerge(s.shared, sharedFrom(snapshot[SHARED_KEY], k => ownsRoom(m, k) && !keepsRegister(m, k)));
   const shared = Object.fromEntries(Object.entries(merged).filter(([k]) => k in records || !inScope(k)));
   const moved = canon(shared) !== canon(s.shared);
-  const forwards: Record<string, string> = { ...s.forwards };
-  for (const [k, { val: from }] of Object.entries(s.shared)) {
-    const to = shared[k]?.val;
-    if (to && to !== from && s.acks[from]?.[k] !== undefined) forwards[from] = to;
+  const forwards: Record<string, string> = { ...s.forwards }, after = placed(m, { ...s, records, shared });
+  for (const [k, { val: from }] of Object.entries(placed(m, s))) {
+    const to = after[k]?.val;
+    // A laid out record has no key of its own in its room: any key uploaded there counts.
+    const uploaded = s.acks[from]?.[k] !== undefined || (!!homeKind(m, k)?.layout && Object.keys(s.acks[from] ?? {}).length > 0);
+    if (from && to && to !== from && uploaded) forwards[from] = to;
   }
   const owed = Object.keys(forwards).length !== Object.keys(s.forwards).length || canon(forwards) !== canon(s.forwards);
   if (records === s.records && !revived && !moved && !owed) return s;
@@ -162,9 +198,13 @@ export function plan<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: stri
     const a = newer.includes(ACCOUNT_KEY) ? null : accountFrom(read[ACCOUNT_KEY]);
     if (a) next = { ...next, profile: next.profile ? mergeAccount(next.profile, a) : a };
   } else {
-    const here: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(read)) if (s.shared[k]?.val === room) here[k] = v;
-    next = mergeIn(m, s, here, 'absorb');
+    const here: Record<string, unknown> = {}, laid: Record<string, R> = {}, theirs = roomRead(m, read);
+    for (const key of Object.keys(placed(m, s))) {
+      if (roomOf(m, s, key) !== room) continue;
+      const layout = homeKind(m, key)!.layout;
+      if (layout) { const r = layout.read(theirs, key); if (r !== null) laid[key] = r; } else if (key in read) here[key] = read[key];
+    }
+    next = mergeIn(m, s, here, 'absorb', undefined, { ...recordsIn(m, here), ...laid });
   }
   const f = newer.includes(FORWARD_KEY) ? null : forwardFrom(read[FORWARD_KEY]);
   if (f && f.to !== room) forward = f.to;
@@ -172,7 +212,7 @@ export function plan<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: stri
   const clock = Math.max(next.clock, stampOf(m, next.records), sharedStamp(next.shared));
 
   const acks: Record<string, string> = { ...(next.acks[room] ?? {}) }, puts: Put[] = [];
-  const docs = roomDocs(m, next, room);
+  const docs = roomDocs(m, next, room), once = writtenOnce(m, next, room);
   for (const key of Object.keys(read)) if (!(key in docs) && !newer.includes(key)) delete acks[key];
   for (const key of Object.keys(acks)) if (inScope(key) && !(key in docs) && !(key in read)) delete acks[key];
   if (room === s.account) for (const key of legacy) acks[key] = hash(read[key]);
@@ -181,7 +221,7 @@ export function plan<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: stri
     if (newer.includes(key)) { acks[key] = NEWER; continue; }
     const there = key in read;
     if (there) acks[key] = hash(read[key]); else delete acks[key];
-    if (!there || canon(read[key]) !== canon(doc)) puts.push({ room, key, value: doc, hash: hash(doc) });
+    if (!there || (!once(key) && canon(read[key]) !== canon(doc))) puts.push({ room, key, value: doc, hash: hash(doc) });
   }
   next = { ...next, clock, acks: { ...next.acks, [room]: acks } };
 
@@ -203,12 +243,18 @@ export interface Chips {
   unsaved: number;
 }
 
-export function chips<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Chips {
+/**
+ * A laid out record is saved once its keys are in its room too, unless `skip` passes over that room (gone, say: the
+ * record then follows the account room alone).
+ */
+export function chips<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, skip: (room: string) => boolean = () => false): Chips {
   const acc = s.account, items: Record<string, Chip> = {};
   let unsaved = 0;
   for (const [key, doc] of Object.entries(docsOf(m, s.records))) {
     if (!isLive(m, key, s.records[key]!)) continue;
-    const chip: Chip = !acc || s.acks[acc]?.[key] === undefined ? 'phone' : clean(s, acc, key, doc) ? 'saved' : 'waiting';
+    let chip: Chip = !acc || s.acks[acc]?.[key] === undefined ? 'phone' : clean(s, acc, key, doc) ? 'saved' : 'waiting';
+    const room = chip === 'saved' && homeKind(m, key)!.layout ? roomOf(m, s, key) : null;
+    if (room !== null && !skip(room) && !laidClean(m, s, key, room)) chip = 'waiting';
     items[key] = chip;
     if (chip !== 'saved') unsaved++;
   }

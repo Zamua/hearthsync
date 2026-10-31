@@ -186,12 +186,23 @@ export function placed<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Regs<st
   return out ?? s.shared;
 }
 
+/** A record syncing with a room of its own: its key, the room, the record and its kind. */
+export interface Placement<R> { key: string; room: string; record: R; kind: Kind<R> }
+
+/** The record at key as it syncs with its own room; null when it is not shared, or this account left it. */
+function placement<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string): Placement<R> | null {
+  const record = s.records[key], kind = sharedKind(m, key);
+  if (record === undefined || !kind) return null;
+  const reg = kind.register ? kind.register.get(record) : s.shared[key];
+  return reg && reg.val !== LEFT ? { key, room: reg.val, record, kind } : null;
+}
+
+/** Every record syncing with a room of its own. */
+export const placements = <R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Placement<R>[] => Object.keys(placed(m, s)).flatMap(k => placement(m, s, k) ?? []);
+
 /** The room the record at key syncs with: none when it is not shared, or this account left it. */
 export function roomOf<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string): string | null {
-  const r = s.records[key], k = sharedKind(m, key);
-  if (r === undefined || !k) return null;
-  const reg = k.register ? k.register.get(r) : s.shared[key];
-  return reg && reg.val !== LEFT ? reg.val : null;
+  return placement(m, s, key)?.room ?? null;
 }
 
 /** Keys moved to a room (or LEFT) at the next stamp; s itself when none moves. */

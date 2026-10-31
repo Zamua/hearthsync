@@ -57,11 +57,20 @@ export function moved<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: stri
 
 const count = <R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, k: Kind<R>): number => Object.keys(s.records).filter(key => kindOf(m, key) === k).length;
 
+/**
+ * The store with room for a record at key under its kind's cap: s itself while the key is held or the cap not reached,
+ * else with the kind's oldest tombstone purged; null when the kind has none.
+ */
+function evictForNew<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string, k: Kind<R>): LocalStore<R, A> | null {
+  if (key in s.records || k.cap === undefined || count(m, s, k) < k.cap) return s;
+  const drop = oldestTombstone(m, s, x => kindOf(m, x) === k);
+  return drop === null ? null : purgeRecord(m, s, drop);
+}
+
 /** Whether a new record fits at key: under its kind's cap, or a tombstone of that kind can make way. */
 export function roomFor<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string): boolean {
   const k = homeKind(m, key);
-  if (!k) return false;
-  return k.cap === undefined || key in s.records || count(m, s, k) < k.cap || oldestTombstone(m, s, x => kindOf(m, x) === k) !== null;
+  return !!k && evictForNew(m, s, key, k) !== null;
 }
 
 /** The key of the oldest tombstone, among the keys `allow` passes. */
@@ -124,13 +133,8 @@ export function putRecord<R, A>(
   const k = homeKind(m, key);
   if (!k) throw new Error(`not a key of this model: ${key}`);
   if (play && moved(m, s, key, play)) return { store: s, result: 'moved' };
-  const held = s.records[key] ?? null;
-  let base = s;
-  if (held === null && k.cap !== undefined && count(m, s, k) >= k.cap) {
-    const drop = oldestTombstone(m, s, x => kindOf(m, x) === k);
-    if (!drop) return { store: s, result: 'full' };
-    base = purgeRecord(m, s, drop);
-  }
+  const held = s.records[key] ?? null, base = evictForNew(m, s, key, k);
+  if (!base) return { store: s, result: 'full' };
   const t = tick(base.clock, now), next = f(held, t);
   if (next === held) return { store: s, result: 'same' };
   return { store: { ...base, clock: t, records: { ...base.records, [key]: next } }, result: 'saved' };
@@ -277,12 +281,8 @@ export function joinRoom<R, A>(
   const found = sharedIn(m, snapshot, room);
   if (found === null || !isRoomId(room)) return 'none';
   const { key, kind: k } = found;
-  let base = purgeDone(s, key);
-  if (!(key in s.records) && k.cap !== undefined && count(m, s, k) >= k.cap) {
-    const drop = oldestTombstone(m, s, x => kindOf(m, x) === k);
-    if (!drop) return 'full';
-    base = purgeRecord(m, base, drop);
-  }
+  let base = evictForNew(m, purgeDone(s, key), key, k);
+  if (!base) return 'full';
   let records = mergeRecords(m, base.records, { [key]: roomRecord(m, snapshot, key)! });
   if (k.enter) records = { ...records, [key]: k.enter(records[key]!, tick(Math.max(base.clock, stampOf(m, records)), now)) };
   base = { ...base, clock: Math.max(base.clock, stampOf(m, records)), records };

@@ -2,8 +2,15 @@
 
 ## Unreleased
 
+Added:
+
+- `AccountKind` and `SharedKind`, the two halves of `Kind`.
+
 Changed:
 
+- `Kind` is `AccountKind | SharedKind`, so `layout`, `deletes`, `enter` and `register`, which only a shared record
+  reads, type-check only beside `room: 'own'` instead of being ignored without it. A kind spread from a value typed
+  `Kind` and given one of them must spread from a `SharedKind`, or say `room: 'own'` itself.
 - A model's `kind` is never asked about `meta` or `acks` either: a record at either key was kept in local storage under
   the store's own meta or acks.
 

@@ -2,7 +2,7 @@ import { ACCOUNT_KEY, LEFT, type AccountDoc } from './account.js';
 import { isRoomId } from './code.js';
 import { UNTIMED, canon, regsMerge, tick, type Reg, type Regs, type Stamp } from './crdt.js';
 import { publicId } from './identity.js';
-import { samePlay, type Kind, type Model, type Playthrough, type Snapshot } from './model.js';
+import { samePlay, type Kind, type Model, type Playthrough, type SharedKind, type Snapshot } from './model.js';
 import { homeKind, isLive, kindOf, mergeRecords, ownsRoom, recordRoom, recordsIn, roomRecord, sharedKind, stampOf, tombstoneOf, type Records } from './records.js';
 
 // This device's copy of the account: the only thing the app reads, written before any network call. Every edit takes
@@ -187,7 +187,7 @@ export function placed<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Regs<st
 }
 
 /** A record syncing with a room of its own: its key, the room, the record and its kind. */
-export interface Placement<R> { key: string; room: string; record: R; kind: Kind<R> }
+export interface Placement<R> { key: string; room: string; record: R; kind: SharedKind<R> }
 
 /** The record at key as it syncs with its own room; null when it is not shared, or this account left it. */
 function placement<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string): Placement<R> | null {
@@ -241,7 +241,7 @@ const holdsAccountRecords = <R>(m: Model<R, unknown>, snapshot: Snapshot): boole
 export const isAccountRoom = <R>(m: Model<R, unknown>, snapshot: Snapshot): boolean => ACCOUNT_KEY in snapshot || holdsAccountRecords(m, snapshot);
 
 /** The record sharedKey finds, with its kind. */
-function sharedIn<R>(m: Model<R, unknown>, snapshot: Snapshot, room?: string): { key: string; kind: Kind<R> } | null {
+function sharedIn<R>(m: Model<R, unknown>, snapshot: Snapshot, room?: string): { key: string; kind: SharedKind<R> } | null {
   if (ACCOUNT_KEY in snapshot) return null;
   const laid = room !== undefined ? m.roomKey?.(snapshot, room) ?? null : null, laidKind = laid === null ? null : sharedKind(m, laid);
   if (laid !== null && laidKind?.layout) {
@@ -249,7 +249,7 @@ function sharedIn<R>(m: Model<R, unknown>, snapshot: Snapshot, room?: string): {
     if (r !== null && isLive(m, laid, r)) return { key: laid, kind: laidKind };
   }
   if (holdsAccountRecords(m, snapshot)) return null;
-  let found: { key: string; kind: Kind<R> } | null = null;
+  let found: { key: string; kind: SharedKind<R> } | null = null;
   for (const [key, r] of Object.entries(recordsIn(m, snapshot))) {
     const kind = sharedKind(m, key);
     if (kind && !kind.layout && isLive(m, key, r) && (!found || key < found.key)) found = { key, kind };

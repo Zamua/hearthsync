@@ -11,7 +11,9 @@ export {
   ACCOUNT_KEY, DOC, FORWARD_KEY, LEFT, SHARED_KEY, SHARED_LEFT, accountDoc, accountFrom, forwardDoc, forwardFrom, isNewer, isPlace, mergeAccount, mergeForward,
   sharedDoc, sharedFrom, sharedRegs, type AccountDoc, type ForwardDoc,
 } from './account.js';
-export { playOrder, samePlay, type AppMeta, type Fold, type Kind, type Model, type Playthrough, type RoomLayout, type Snapshot } from './model.js';
+export {
+  playOrder, samePlay, type AccountKind, type AppMeta, type Fold, type Kind, type Model, type Playthrough, type RoomLayout, type SharedKind, type Snapshot,
+} from './model.js';
 export {
   docOf, docsOf, homeKind, isLive, keepsRegister, kindOf, leavesOnDelete, mergeRecords, ownsRoom, recordRoom, recordsIn, roomRead, roomRecord, stampOf, tombstoneOf,
   type MergeMode, type Records,

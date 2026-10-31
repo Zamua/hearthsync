@@ -20,9 +20,12 @@ export const playOrder = (a: Playthrough, b: Playthrough): number => a.run - b.r
 
 /**
  * One kind of record: each lives at its own key in the account room (and, if shared, in a room of its own, whole or
- * by its layout), and merges on its own.
+ * by its layout), and merges on its own. The options of shared records type-check only on a `SharedKind`.
  */
-export interface Kind<R> {
+export type Kind<R> = AccountKind<R> | SharedKind<R>;
+
+/** What every kind gives. */
+interface KindBase<R> {
   /** The record a doc holds, repaired; null when it is not one. key is where it was read from. */
   from(raw: unknown, key: string): R | null;
   /** Commutative, associative, idempotent, and canonical: two devices holding the same records build the same docs. */
@@ -55,13 +58,26 @@ export interface Kind<R> {
    * written, and is read again only when it changed since last seen.
    */
   home?(r: R): string;
+}
+
+/** A kind whose records live in the account room only. */
+export interface AccountKind<R> extends KindBase<R> {
+  room?: 'account';
+  deletes?: never;
+  enter?: never;
+  layout?: never;
+  register?: never;
+}
+
+/** A kind whose records can be shared with other accounts. */
+export interface SharedKind<R> extends KindBase<R> {
   /**
-   * 'own': a record can also live in a room of its own, shared with other accounts by that room's id (`Sync.share`,
-   * `Sync.join`). The account room still keeps it, and which room it is in. 'account' (the default): that room only.
+   * A record can also live in a room of its own, shared with other accounts by that room's id (`Sync.share`,
+   * `Sync.join`). The account room still keeps it, and which room it is in.
    */
-  room?: 'account' | 'own';
+  room: 'own';
   /**
-   * For a whole-record kind with `room: 'own'` and `life`: 'account' makes deleting the record this account leaving
+   * For a whole-record kind with `life`: 'account' makes deleting the record this account leaving
    * its room, which keeps the record for its other members; the tombstone never reaches it. 'room' (the default): the
    * tombstone reaches the room, so the record is gone for every member. A kind with a layout always leaves: its room
    * holds what the layout projects, which must not carry the tombstone. Builds before this ignore it: see the README.

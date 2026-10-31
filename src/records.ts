@@ -1,6 +1,6 @@
 import { DOC, isLibraryKey, isNewer } from './account.js';
 import { canon, type Reg, type Stamp } from './crdt.js';
-import { ACKS, META, samePlay, type Kind, type Model, type Snapshot } from './model.js';
+import { ACKS, META, samePlay, type Kind, type Model, type SharedKind, type Snapshot } from './model.js';
 
 // The app's records, one per room key, read, written and merged through the model's kinds.
 
@@ -13,7 +13,7 @@ export const kindOf = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => 
 export const homeKind = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => { const k = kindOf(m, key); return k && !k.home ? k : null; };
 
 /** The kind of a key whose records can live in a room of their own; null for any other. */
-export const sharedKind = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => { const k = homeKind(m, key); return k?.room === 'own' ? k : null; };
+export const sharedKind = <R>(m: Model<R, unknown>, key: string): SharedKind<R> | null => { const k = homeKind(m, key); return k?.room === 'own' ? k : null; };
 
 /** Whether the record at key can live in a room of its own. */
 export const ownsRoom = <R>(m: Model<R, unknown>, key: string): boolean => sharedKind(m, key) !== null;
@@ -25,7 +25,7 @@ export const keepsRegister = <R>(m: Model<R, unknown>, key: string): boolean => 
 export const recordRoom = <R>(m: Model<R, unknown>, key: string, r: R): Reg<string> | undefined => sharedKind(m, key)?.register?.get(r);
 
 /** Whether deleting a shared kind's record is this account leaving its room (`Kind.deletes`): always for a layout. */
-export const leaves = <R>(k: Kind<R>): boolean => !!k.layout || k.deletes === 'account';
+export const leaves = <R>(k: SharedKind<R>): boolean => !!k.layout || k.deletes === 'account';
 
 /** Whether deleting the record at key is this account leaving its room. */
 export const leavesOnDelete = <R>(m: Model<R, unknown>, key: string): boolean => { const k = sharedKind(m, key); return !!k && leaves(k); };

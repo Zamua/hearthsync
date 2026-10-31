@@ -2,8 +2,8 @@ import { ACCOUNT_KEY, DOC, FORWARD_KEY, SHARED_KEY, SHARED_LEFT, accountDoc, acc
 import { canon, hash, regsMerge } from './crdt.js';
 import type { Model, Snapshot } from './model.js';
 import {
-  docOf, docsOf, homeKind, isLive, keepsRegister, kindOf, leavesOnDelete, mergeRecords, ownsRoom, recordsIn, roomRead, stampOf, tombstoneOf, versionOf,
-  type MergeMode, type Records,
+  docOf, docsOf, homeKind, isLive, keepsRegister, kindOf, leavesOnDelete, mergeRecords, ownsRoom, recordsIn, roomRead, sharedKind, stampOf, tombstoneOf,
+  versionOf, type MergeMode, type Records,
 } from './records.js';
 import { placed, roomOf, sharedStamp, type LocalStore } from './store.js';
 
@@ -135,7 +135,7 @@ function mergeIn<R, A>(
   for (const [k, { val: from }] of Object.entries(placed(m, s))) {
     const to = after[k]?.val;
     // A laid out record has no key of its own in its room: any key uploaded there counts.
-    const uploaded = s.acks[from]?.[k] !== undefined || (!!homeKind(m, k)?.layout && Object.keys(s.acks[from] ?? {}).length > 0);
+    const uploaded = s.acks[from]?.[k] !== undefined || (!!sharedKind(m, k)?.layout && Object.keys(s.acks[from] ?? {}).length > 0);
     if (from && to && to !== from && uploaded) forwards[from] = to;
   }
   const owed = Object.keys(forwards).length !== Object.keys(s.forwards).length || canon(forwards) !== canon(s.forwards);

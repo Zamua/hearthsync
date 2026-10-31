@@ -3,7 +3,7 @@ import { isRoomId } from './code.js';
 import { UNTIMED, canon, regsMerge, tick, type Reg, type Regs, type Stamp } from './crdt.js';
 import { publicId } from './identity.js';
 import { samePlay, type Kind, type Model, type Playthrough, type Snapshot } from './model.js';
-import { homeKind, isLive, keepsRegister, kindOf, mergeRecords, ownsRoom, recordRoom, recordsIn, roomRecord, stampOf, tombstoneOf, type Records } from './records.js';
+import { homeKind, isLive, kindOf, mergeRecords, ownsRoom, recordRoom, recordsIn, roomRecord, sharedKind, stampOf, tombstoneOf, type Records } from './records.js';
 
 // This device's copy of the account: the only thing the app reads, written before any network call. Every edit takes
 // the wall clock (plus server skew) and stamps through the store's clock.
@@ -180,7 +180,7 @@ export function forwardDone<R, A>(s: LocalStore<R, A>, from: string): LocalStore
 export function placed<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Regs<string> {
   let out: Record<string, Reg<string>> | null = null;
   for (const [key, r] of Object.entries(s.records)) {
-    const reg = keepsRegister(m, key) ? recordRoom(m, key, r) : undefined;
+    const reg = recordRoom(m, key, r);
     if (reg) (out ??= { ...s.shared })[key] = reg;
   }
   return out ?? s.shared;
@@ -188,9 +188,9 @@ export function placed<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Regs<st
 
 /** The room the record at key syncs with: none when it is not shared, or this account left it. */
 export function roomOf<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string): string | null {
-  const r = s.records[key];
-  if (r === undefined || !ownsRoom(m, key)) return null;
-  const reg = keepsRegister(m, key) ? recordRoom(m, key, r) : s.shared[key];
+  const r = s.records[key], k = sharedKind(m, key);
+  if (r === undefined || !k) return null;
+  const reg = k.register ? k.register.get(r) : s.shared[key];
   return reg && reg.val !== LEFT ? reg.val : null;
 }
 
@@ -200,8 +200,8 @@ function moveTo<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, keys: readonly 
   if (!move.length || (room !== LEFT && !isRoomId(room))) return s;
   const t = tick(s.clock, now), reg = { val: room, t }, records: Record<string, R> = { ...s.records }, shared: Record<string, Reg<string>> = {};
   for (const k of move) {
-    const r = records[k];
-    if (keepsRegister(m, k)) { if (r !== undefined) records[k] = homeKind(m, k)!.register!.set(r, reg); } else shared[k] = reg;
+    const r = records[k], inRecord = sharedKind(m, k)?.register;
+    if (inRecord) { if (r !== undefined) records[k] = inRecord.set(r, reg); } else shared[k] = reg;
   }
   return { ...s, clock: t, records, shared: Object.keys(shared).length ? regsMerge(s.shared, shared) : s.shared };
 }
@@ -229,21 +229,30 @@ const holdsAccountRecords = <R>(m: Model<R, unknown>, snapshot: Snapshot): boole
 /** A room holding a manifest or any of the app's keys but shared records (a shared room holds only those). */
 export const isAccountRoom = <R>(m: Model<R, unknown>, snapshot: Snapshot): boolean => ACCOUNT_KEY in snapshot || holdsAccountRecords(m, snapshot);
 
+/** The record sharedKey finds, with its kind. */
+function sharedIn<R>(m: Model<R, unknown>, snapshot: Snapshot, room?: string): { key: string; kind: Kind<R> } | null {
+  if (ACCOUNT_KEY in snapshot) return null;
+  const laid = room !== undefined ? m.roomKey?.(snapshot, room) ?? null : null, laidKind = laid === null ? null : sharedKind(m, laid);
+  if (laid !== null && laidKind?.layout) {
+    const r = roomRecord(m, snapshot, laid);
+    if (r !== null && isLive(m, laid, r)) return { key: laid, kind: laidKind };
+  }
+  if (holdsAccountRecords(m, snapshot)) return null;
+  let found: { key: string; kind: Kind<R> } | null = null;
+  for (const [key, r] of Object.entries(recordsIn(m, snapshot))) {
+    const kind = sharedKind(m, key);
+    if (kind && !kind.layout && isLive(m, key, r) && (!found || key < found.key)) found = { key, kind };
+  }
+  return found;
+}
+
 /**
  * The live shared record a room holds: its key (the smallest, should it hold several); null for none, and for an
  * account room, which holds a manifest or records of the account's own. A room laid out by a kind's layout is found
  * through the model's roomKey.
  */
 export function sharedKey<R>(m: Model<R, unknown>, snapshot: Snapshot, room?: string): string | null {
-  if (ACCOUNT_KEY in snapshot) return null;
-  const laid = room !== undefined ? m.roomKey?.(snapshot, room) ?? null : null;
-  if (laid !== null) {
-    const k = homeKind(m, laid), r = k?.layout && k.room === 'own' ? roomRecord(m, snapshot, laid) : null;
-    if (r !== null && isLive(m, laid, r)) return laid;
-  }
-  if (holdsAccountRecords(m, snapshot)) return null;
-  const records = recordsIn(m, snapshot);
-  return Object.keys(records).filter(k => ownsRoom(m, k) && !homeKind(m, k)!.layout && isLive(m, k, records[k]!)).sort()[0] ?? null;
+  return sharedIn(m, snapshot, room)?.key ?? null;
 }
 
 /**
@@ -254,10 +263,10 @@ export function sharedKey<R>(m: Model<R, unknown>, snapshot: Snapshot, room?: st
 export function joinRoom<R, A>(
   m: Model<R, unknown>, s: LocalStore<R, A>, room: string, snapshot: Snapshot, now: number,
 ): { store: LocalStore<R, A>; key: string } | 'none' | 'full' {
-  const key = sharedKey(m, snapshot, room);
-  if (key === null || !isRoomId(room)) return 'none';
+  const found = sharedIn(m, snapshot, room);
+  if (found === null || !isRoomId(room)) return 'none';
+  const { key, kind: k } = found;
   let base = purgeDone(s, key);
-  const k = homeKind(m, key)!;
   if (!(key in s.records) && k.cap !== undefined && count(m, s, k) >= k.cap) {
     const drop = oldestTombstone(m, s, x => kindOf(m, x) === k);
     if (!drop) return 'full';

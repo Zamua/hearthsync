@@ -12,17 +12,23 @@ export const kindOf = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => 
 /** The kind of a key records live at: the app's, and not one an earlier build wrote. */
 export const homeKind = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => { const k = kindOf(m, key); return k && !k.home ? k : null; };
 
+/** The kind of a key whose records can live in a room of their own; null for any other. */
+export const sharedKind = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => { const k = homeKind(m, key); return k?.room === 'own' ? k : null; };
+
 /** Whether the record at key can live in a room of its own. */
-export const ownsRoom = <R>(m: Model<R, unknown>, key: string): boolean => homeKind(m, key)?.room === 'own';
+export const ownsRoom = <R>(m: Model<R, unknown>, key: string): boolean => sharedKind(m, key) !== null;
 
 /** Whether the record at key keeps its room register inside itself (`Kind.register`). */
-export const keepsRegister = <R>(m: Model<R, unknown>, key: string): boolean => ownsRoom(m, key) && !!homeKind(m, key)!.register;
+export const keepsRegister = <R>(m: Model<R, unknown>, key: string): boolean => !!sharedKind(m, key)?.register;
 
 /** The room register of a record whose kind keeps it inside the record; undefined for any other, or none yet. */
-export const recordRoom = <R>(m: Model<R, unknown>, key: string, r: R): Reg<string> | undefined => homeKind(m, key)?.register?.get(r);
+export const recordRoom = <R>(m: Model<R, unknown>, key: string, r: R): Reg<string> | undefined => sharedKind(m, key)?.register?.get(r);
 
-/** Whether deleting the record at key is this account leaving its room (`Kind.deletes`). */
-export const leavesOnDelete = <R>(m: Model<R, unknown>, key: string): boolean => { const k = homeKind(m, key); return !!k?.layout || k?.deletes === 'account'; };
+/** Whether deleting a shared kind's record is this account leaving its room (`Kind.deletes`): always for a layout. */
+export const leaves = <R>(k: Kind<R>): boolean => !!k.layout || k.deletes === 'account';
+
+/** Whether deleting the record at key is this account leaving its room. */
+export const leavesOnDelete = <R>(m: Model<R, unknown>, key: string): boolean => { const k = sharedKind(m, key); return !!k && leaves(k); };
 
 export const versionOf = <R>(m: Model<R, unknown>): number => m.version ?? DOC;
 
@@ -80,7 +86,7 @@ export function roomRead<R>(m: Model<R, unknown>, snap: Snapshot): Snapshot {
 
 /** The record at key as a shared room holds it, by its kind's layout or whole at its key; null when it holds none. */
 export function roomRecord<R>(m: Model<R, unknown>, snap: Snapshot, key: string): R | null {
-  const layout = homeKind(m, key)?.layout;
+  const layout = sharedKind(m, key)?.layout;
   return layout ? layout.read(roomRead(m, snap), key) : recordsIn(m, snap)[key] ?? null;
 }
 

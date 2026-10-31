@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { publicId } from '../src/identity.js';
-import type { Model } from '../src/model.js';
-import { kindOf } from '../src/records.js';
+import type { Kind, Model } from '../src/model.js';
+import { kindOf, ownsRoom } from '../src/records.js';
 import { adoptAccount, editRecords, emptyStore, forwardDone, importRecords, moved, putRecord, queueForward, switchAccount, type LocalStore } from '../src/store.js';
 import { cellsOf, newPuzzle, noteKind, notes, notesOf, puzzles, slotKey, solve, startOver, tagNote, writeNote, type Note, type Puzzle } from './models.js';
 
@@ -29,6 +29,15 @@ describe('records in the store', () => {
   it("never takes a name the library keeps, in a room or in storage, for a record's key, whatever the model says", () => {
     const greedy: Model<Note> = { ...notes, kind: () => noteKind };
     expect(['account', 'shared', 'forward', 'meta', 'acks', 'note/a'].map(k => kindOf(greedy, k) !== null)).toEqual([false, false, false, false, false, true]);
+  });
+
+  it("takes the options of shared records only on a kind with room: 'own'", () => {
+    const fields = { from: () => null, merge: (a: Note) => a, stamp: () => 0 }, layout = { docs: () => ({}), read: () => null };
+    // @ts-expect-error: without room: 'own', the layout would be ignored
+    const ignored: Kind<Note> = { ...fields, layout };
+    const shared: Kind<Note> = { ...fields, room: 'own', layout };
+    const of = (k: Kind<Note>): Model<Note> => ({ ...notes, kind: () => k });
+    expect([ownsRoom(of(ignored), 'note/a'), ownsRoom(of(shared), 'note/a')]).toEqual([false, true]);
   });
 
   it('an edit of the records takes the next stamp, or leaves the store as it was', () => {

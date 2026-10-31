@@ -1,5 +1,5 @@
 import { UNTIMED, gsetAdd, gsetList, gsetMerge, hash, isStamp, lww, lwwOpt, tick, type GSet, type Reg, type Stamp } from '../src/crdt.js';
-import { playOrder, samePlay, type AppMeta, type Fold, type Kind, type Model, type Playthrough } from '../src/model.js';
+import { playOrder, samePlay, type AppMeta, type Fold, type Kind, type Model, type Playthrough, type SharedKind } from '../src/model.js';
 import { gsetFrom, isMember, isObj, regFrom } from '../src/repair.js';
 import { isPlace } from '../src/account.js';
 import { importRecords, putRecord, type LocalStore, type PutResult } from '../src/store.js';
@@ -204,7 +204,7 @@ export const listKind: Kind<Board> = {
   life: r => ({ used: r.u, deleted: r.deleted }),
 };
 
-export const boardKind: Kind<Board> = { ...listKind, room: 'own', cap: 3 };
+export const boardKind: SharedKind<Board> = { ...listKind, room: 'own', cap: 3 };
 
 export const boards: Model<Board> = {
   prefix: 'boards.v1.',
@@ -234,7 +234,7 @@ export function boardsOf(s: { records: Records<Board> }): Record<string, { title
 }
 
 /** Boards whose deleting is leaving: a member's delete keeps the board for the others. */
-export const leavingBoardKind: Kind<Board> = { ...boardKind, deletes: 'account', enter: (r, t) => ({ ...r, u: t }) };
+export const leavingBoardKind: SharedKind<Board> = { ...boardKind, deletes: 'account', enter: (r, t) => ({ ...r, u: t }) };
 export const leavingBoards: Model<Board> = { ...boards, prefix: 'leaving.v1.', kind: key => (boards.kind(key) === boardKind ? leavingBoardKind : boards.kind(key)) };
 
 // Corkboards.
@@ -252,7 +252,7 @@ export const corkKey = (id: string): string => `cork/${id}`;
 const blankCork = (id: string): Cork => ({ id, title: { val: '', t: 0 }, made: 0, u: 0, left: 0, pins: {}, starred: {} });
 const earliest = (a: Stamp, b: Stamp): Stamp => (a === 0 ? b : b === 0 ? a : Math.min(a, b));
 
-export const corkKind: Kind<Cork> = {
+export const corkKind: SharedKind<Cork> = {
   from(raw, key) {
     const id = CORK.exec(key)?.[1];
     if (!id || !isObj(raw) || raw.id !== id) return null;

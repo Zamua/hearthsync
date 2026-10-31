@@ -126,7 +126,8 @@ there is none. A room answering `413` for a new key gives up its oldest tombston
 
 ### Shared rooms
 
-A kind with `room: 'own'` marks records that can be shared with other accounts: a board friends pin things to, say.
+A kind with `room: 'own'` (a `SharedKind`, the only kind the options below type-check on) marks records that can be
+shared with other accounts: a board friends pin things to, say.
 Such a record lives in a room of its own as well as in the account room, which keeps a copy of it and, under `shared`,
 which room it is in (a register per key: the last move wins). The room holds only that record's doc, so its id, the
 invite, gives nothing else of the account away.

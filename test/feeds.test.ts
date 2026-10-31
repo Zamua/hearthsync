@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { Kind, Model } from '../src/model.js';
+import type { Model, SharedKind } from '../src/model.js';
 import { dirty } from '../src/plan.js';
 import { device, fakeWorld, type Device, type FakeRooms, type TestClock } from '../src/testing/index.js';
 import { corkKey, corkKind, corks, editCork, leaveCork, type Cork } from './models.js';
@@ -10,7 +10,7 @@ const cork = (d: Device<Cork>, o: { title?: string; pin?: string } = {}) => d.lo
 const puts = (d: Device<Cork>, room: string) => d.sent.filter(l => l.startsWith(`PUT /api/rooms/${room}/`));
 
 /** Corkboards whose pins are written once too. */
-const onceKind: Kind<Cork> = { ...corkKind, layout: { ...corkKind.layout!, once: k => k === 'id' || k === 'made' || k.startsWith('pin/') } };
+const onceKind: SharedKind<Cork> = { ...corkKind, layout: { ...corkKind.layout!, once: k => k === 'id' || k === 'made' || k.startsWith('pin/') } };
 const onceCorks: Model<Cork> = { ...corks, prefix: 'oncecorks.v1.', kind: key => (corks.kind(key) ? onceKind : null) };
 
 /** a shares a corkboard; b, another account, joins it, starts its engine and feeds the room from a live copy. */

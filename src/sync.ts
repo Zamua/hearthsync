@@ -1,18 +1,19 @@
-import { FORWARD_KEY, ACCOUNT_KEY, forwardDoc, forwardFrom } from './account.js';
+import { FORWARD_KEY, forwardDoc } from './account.js';
 import { Backoff } from './backoff.js';
 import { codeFromRoom, isRoomId, parseCode, type CodeError } from './code.js';
 import { tick } from './crdt.js';
-import { resolveForward, tagOf } from './identity.js';
+import { tagOf } from './identity.js';
 import type { Local } from './local.js';
 import type { Snapshot } from './model.js';
-import { isLive, kindOf, mergeRecords, ownsRoom, recordsIn, roomRecord, type Records } from './records.js';
+import { isLive, mergeRecords, ownsRoom, recordsIn, roomRecord, type Records } from './records.js';
 import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, writtenOnce, type Put } from './plan.js';
 import { RoomHealth } from './health.js';
+import { forwardsFrom, scanRoom, type Landing } from './reads.js';
 import { RoomError, type RoomApi } from './rooms.js';
 import { StatusTracker, type ItemChip, type SyncProblem, type SyncState, type SyncStatus } from './status.js';
 import {
-  adoptAccount, expire, followRoom, forwardDone, joinRoom, leaveRoom, oldestTombstone, placed, purgeDone, purgeRecord, queueForward, roomOf, shareRecord,
-  sharedKey, switchAccount, type LocalStore,
+  adoptAccount, expire, followRoom, forwardDone, isAccountRoom, joinRoom, leaveRoom, oldestTombstone, placed, purgeDone, purgeRecord, queueForward, roomOf,
+  shareRecord, sharedKey, switchAccount, type LocalStore,
 } from './store.js';
 
 // The sync engine: the device's store, its account room and the rooms of its shared records, reconciled in the
@@ -470,7 +471,7 @@ export class Sync<R, A = undefined> {
       if (remote) return { remote, keys };
     }
     let remote: Snapshot;
-    try { remote = await this.scanRoom(room); } catch (e) {
+    try { remote = await scanRoom(this.api, room); } catch (e) {
       if (e instanceof RoomError && (e.status === 404 || e.status === 400)) { this.health.missing(room, e.status); return null; }
       throw e;
     }
@@ -496,14 +497,6 @@ export class Sync<R, A = undefined> {
       this.health.answered(room);
     }
     return remote;
-  }
-
-  /** A scan whose 404 counts only once a read past any cache agrees: an edge may keep a 404 for minutes. */
-  private async scanRoom(room: string): Promise<Snapshot> {
-    try { return await this.api.scan(room); } catch (e) {
-      if (!(e instanceof RoomError) || e.status !== 404) throw e;
-      return this.api.scan(room, { fresh: true });
-    }
   }
 
   /** Merges a read into the store and uploads what the server lacks: whether anything moved. */
@@ -582,7 +575,7 @@ export class Sync<R, A = undefined> {
    * there; a shared room's records move to the room its forwards lead to.
    */
   private async follow(room: string, remote: Snapshot): Promise<void> {
-    const end = await this.forwardsFrom(room, remote);
+    const end = await forwardsFrom(this.api, room, remote);
     if (!end) return;
     if (end.room === room) { this.cycleHeads.add(room); return; }
     if (room !== this.local.store.account) { this.local.edit((s, now) => followRoom(this.m, s, room, end.room, now), 'sync'); return; }
@@ -590,26 +583,6 @@ export class Sync<R, A = undefined> {
     this.local.edit((s, now) => joinAccount(this.m, switchAccount(s, end.room, now, this.m.salt).store, end.snapshot), 'sync');
     this.tellNews(prev, this.local.store);
     this.health.answered(end.room);
-  }
-
-  /** Where a chain of forwards from a scanned room ends, with that room's scan; null if it leads to a missing room. */
-  private async forwardsFrom(start: string, snap: Snapshot): Promise<{ room: string; snapshot: Snapshot } | null> {
-    const snaps = new Map<string, Snapshot>([[start, snap]]);
-    const forwardOf = (room: string): string | null | undefined => {
-      const s = snaps.get(room);
-      if (!s) return undefined;
-      const f = forwardFrom(s[FORWARD_KEY]);
-      return f && f.to !== room ? f.to : null;
-    };
-    for (let i = 0; i < 16; i++) {
-      const r = resolveForward(start, forwardOf);
-      if ('room' in r) return { room: r.room, snapshot: snaps.get(r.room)! };
-      try { snaps.set(r.need, await this.scanRoom(r.need)); } catch (e) {
-        if (e instanceof RoomError && e.status === 404) return null;
-        throw e;
-      }
-    }
-    return null;
   }
 
   /**
@@ -739,23 +712,18 @@ export class Sync<R, A = undefined> {
     return c;
   }
 
-  /** A room holding a manifest or any of the app's keys but shared records (a shared room holds only those). */
-  private isAccountRoom(snap: Snapshot): boolean {
-    return ACCOUNT_KEY in snap || Object.keys(snap).some(k => kindOf(this.m, k) !== null && !ownsRoom(this.m, k));
-  }
-
-  private async readAccount(room: string): Promise<{ room: string; snapshot: Snapshot }> {
-    const snap = await this.scanRoom(room);
-    if (!this.isAccountRoom(snap)) throw new SyncError('notaccount');
-    const end = await this.forwardsFrom(room, snap);
+  private async readAccount(room: string): Promise<Landing> {
+    const snap = await scanRoom(this.api, room);
+    if (!isAccountRoom(this.m, snap)) throw new SyncError('notaccount');
+    const end = await forwardsFrom(this.api, room, snap);
     if (!end) throw new SyncError('notfound');
     return end;
   }
 
   /** A shared room as it is now, past any forwards: the key of its record, and its scan. */
-  private async readShared(room: string): Promise<{ room: string; key: string; snapshot: Snapshot }> {
+  private async readShared(room: string): Promise<Landing & { key: string }> {
     if (!isRoomId(room)) throw new SyncError('notfound');
-    const end = await this.forwardsFrom(room, await this.scanRoom(room));
+    const end = await forwardsFrom(this.api, room, await scanRoom(this.api, room));
     const key = end && sharedKey(this.m, end.snapshot, end.room);
     if (!end || !key) throw new SyncError('notfound');
     return { ...end, key };

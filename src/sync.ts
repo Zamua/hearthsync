@@ -1,13 +1,14 @@
 import { FORWARD_KEY, ACCOUNT_KEY, forwardDoc, forwardFrom } from './account.js';
 import { Backoff } from './backoff.js';
 import { codeFromRoom, isRoomId, parseCode, type CodeError } from './code.js';
-import { canon, tick } from './crdt.js';
+import { tick } from './crdt.js';
 import { resolveForward, tagOf } from './identity.js';
 import type { Local } from './local.js';
 import { isLive, kindOf, mergeRecords, ownsRoom, recordsIn, roomRecord, type Records } from './records.js';
-import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, writtenOnce, type Chip, type Put } from './plan.js';
+import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, writtenOnce, type Put } from './plan.js';
 import { RoomHealth } from './health.js';
 import { RoomError, type RoomApi } from './rooms.js';
+import { StatusTracker, type ItemChip, type SyncProblem, type SyncState, type SyncStatus } from './status.js';
 import {
   adoptAccount, expire, followRoom, forwardDone, joinRoom, leaveRoom, oldestTombstone, placed, purgeDone, purgeRecord, queueForward, roomOf, shareRecord,
   sharedKey, switchAccount, type LocalStore,
@@ -26,38 +27,10 @@ const FULL_EVERY = 5 * 60_000, AWAY = 60_000;
 const LIGHT_MAX = 4;
 /** Rounds over every room until one moves nothing; bounded, as two devices clobbering each other can keep it busy. */
 const MAX_LAPS = 4;
-/** A save counts as backlog (worth a notice when it lands) if it waited this long, or while the device could not save. */
-const BACKLOG = 2 * 60_000;
 /** Browsers cap the bodies of keepalive requests in flight (64 KiB). */
 const KEEPALIVE_BYTES = 60_000;
 /** A burst of changes to a fed room's copy is planned once, this long after the first. */
 const FEED_DELAY = 150;
-
-export type ItemChip = Chip | 'failed';
-export type SyncState = 'offline' | 'syncing' | 'saved' | 'error';
-/** full: a room or the app hit its cap. lost: the account room is gone. failing: uploads keep failing. rate: no code yet, the server makes no more rooms for now. */
-export type SyncProblem = 'full' | 'lost' | 'failing' | 'rate';
-
-export interface SyncStatus {
-  state: SyncState;
-  problem: SyncProblem | null;
-  /** The account code, once the account room exists. */
-  code: string | null;
-  /** Four hex digits of the account's public id. */
-  tag: string | null;
-  /** Each record's chip, by room key. */
-  items: Readonly<Record<string, ItemChip>>;
-  /** How many records are not on the server. */
-  unsaved: number;
-  /** When a pass last ended with nothing left to upload. */
-  savedAt: number | null;
-  /** A newer build's data was seen: "Update the app". */
-  newer: boolean;
-  /** With problem 'rate': when the next try to make the account room goes out. */
-  retryAt: number | null;
-  /** Keys of shared records whose room is gone: they sync with the account only, until shared again. */
-  gone: string[];
-}
 
 export interface SyncEvents {
   status: SyncStatus;
@@ -118,19 +91,12 @@ export class Sync<R, A = undefined> {
   private netDown = false;
   /** Account rooms that are the landing of a forward cycle: their own forward is ignored. */
   private cycleHeads = new Set<string>();
-  /** Records not yet saved, by key: since when, and whether the device was offline or failing meanwhile. */
-  private pending = new Map<string, { at: number; stuck: boolean }>();
-  private landed = new Set<string>();
   private madeAccount = false;
   private newer = false;
   private savedAt: number | null = null;
   private hiddenAt: number | null = null;
   /** The page-hide flush in flight, outside the pass queue. */
   private flushing: Promise<void> | null = null;
-  private cached: SyncStatus | null = null;
-  private shown = '';
-  private refreshQueued = false;
-  private refreshedAt = -Infinity;
   private feeds = new Map<string, Feed>();
   /** Shares in flight by record key: a second share of a record waits on the first, so the record gets one room. */
   private sharing = new Map<string, Promise<string>>();
@@ -140,12 +106,14 @@ export class Sync<R, A = undefined> {
   private deferred = false;
   private health: RoomHealth;
   private backoff: Backoff;
+  private tracker: StatusTracker;
 
   constructor(private local: Local<R, A>, private api: RoomApi, private env: SyncEnv, private lock: SyncLock = fn => fn()) {
     this.health = new RoomHealth(() => env.now(), () => local.store.account);
     this.backoff = new Backoff(() => env.random());
+    this.tracker = new StatusTracker(() => env.now(), () => this.compute(), () => this.running > 0, st => this.emit('status', st));
     local.on((_next, _prev, source) => {
-      this.touch();
+      this.tracker.touch();
       if (source !== 'sync') this.changed();
     });
   }
@@ -165,7 +133,7 @@ export class Sync<R, A = undefined> {
     for (const fn of this.listeners.get(type) ?? []) (fn as Listener<K>)(v);
   }
 
-  get status(): SyncStatus { return this.cached ??= this.compute(); }
+  get status(): SyncStatus { return this.tracker.status; }
 
   // Triggers.
 
@@ -202,10 +170,10 @@ export class Sync<R, A = undefined> {
     this.netDown = false;
     this.backoff.clear();
     this.schedule(0, true, true);
-    this.touch();
+    this.tracker.touch();
   }
 
-  offline(): void { this.touch(); }
+  offline(): void { this.tracker.touch(); }
 
   /** The page is going to the background and may never run again: what is dirty goes now. */
   hidden(): void {
@@ -437,15 +405,15 @@ export class Sync<R, A = undefined> {
   private exclusive<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.queue.then(() => this.lock(async () => {
       this.running++;
-      this.touch();
-      try { return await fn(); } finally { this.running--; this.touch(); }
+      this.tracker.touch();
+      try { return await fn(); } finally { this.running--; this.tracker.touch(); }
     }));
     this.queue = run.catch(() => {});
     return run;
   }
 
   private async pass(full: boolean): Promise<void> {
-    if (this.backoff.paused(this.env.now()) || !this.env.online()) { this.touch(); return; }
+    if (this.backoff.paused(this.env.now()) || !this.env.online()) { this.tracker.touch(); return; }
     this.madeAccount = false;
     try {
       this.local.edit((s, now) => expire(this.m, s, now), 'sync');
@@ -471,9 +439,8 @@ export class Sync<R, A = undefined> {
 
   /** After a pass, no longer running: the status settles and a landed backlog is told once. */
   private passed(): void {
-    this.refresh();
-    const keys = [...this.landed].sort();
-    this.landed.clear();
+    this.tracker.refresh();
+    const keys = this.tracker.backlog();
     if (keys.length && !this.madeAccount) this.emit('backlog', { keys, at: this.env.now() });
   }
 
@@ -811,37 +778,6 @@ export class Sync<R, A = undefined> {
   }
 
   // Status.
-
-  private touch(): void {
-    this.cached = null;
-    if (this.refreshQueued) return;
-    this.refreshQueued = true;
-    queueMicrotask(() => {
-      this.refreshQueued = false;
-      // Mid-pass, each ack would recount the chips; the pass refreshes once at its end.
-      if (this.running && this.env.now() - this.refreshedAt < 250) return;
-      this.refresh();
-    });
-  }
-
-  private refresh(): void {
-    this.cached = null;
-    const st = this.status, now = this.env.now(), stuck = st.state === 'offline' || st.state === 'error';
-    this.refreshedAt = now;
-    for (const [key, chip] of Object.entries(st.items)) {
-      const had = this.pending.get(key);
-      if (chip !== 'saved') {
-        if (!had) this.pending.set(key, { at: now, stuck });
-        else had.stuck ||= stuck;
-      } else if (had) {
-        this.pending.delete(key);
-        if (had.stuck || now - had.at >= BACKLOG) this.landed.add(key);
-      }
-    }
-    for (const key of this.pending.keys()) if (!(key in st.items)) this.pending.delete(key);
-    const text = canon(st);
-    if (text !== this.shown) { this.shown = text; this.emit('status', st); }
-  }
 
   private problem(): SyncProblem | null {
     const now = this.env.now();

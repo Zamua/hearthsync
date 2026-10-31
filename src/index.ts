@@ -31,8 +31,7 @@ export {
 } from './local.js';
 export { browserEnv, listen, webLock } from './browser.js';
 export { LOST_GAP } from './health.js';
+export { type ItemChip, type SyncProblem, type SyncState, type SyncStatus } from './status.js';
 export {
-  Sync, SyncError,
-  type Feed, type ItemChip, type Linked, type Peek, type Shared, type SyncEnv, type SyncEvents, type SyncFailure, type SyncLock, type SyncProblem, type SyncState,
-  type SyncStatus,
+  Sync, SyncError, type Feed, type Linked, type Peek, type Shared, type SyncEnv, type SyncEvents, type SyncFailure, type SyncLock,
 } from './sync.js';

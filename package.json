@@ -1,6 +1,6 @@
 {
   "name": "hearthsync",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Local-first sync over a simple key-value rooms API, with a short account code instead of a login.",
   "license": "MIT",
   "type": "module",

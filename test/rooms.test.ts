@@ -52,7 +52,7 @@ describe('the rooms API over HTTP', () => {
     expect(await api.scan(room, { fresh: true })).toEqual({ k: 1 });
     const [plain, , first, second] = urls.slice(-4).map(u => new URL(u));
     expect([plain!.search, first!.search === '', first!.search === second!.search]).toEqual(['', false, false]);
-    expect(host.log.at(-3)).toBe(`GET /api/rooms/${room} 404 cdn`);
+    expect(host.log.filter(l => l.includes(' 404'))).toEqual([`GET /api/rooms/${room} 404`, `GET /api/rooms/${room} 404 cdn`]);
   });
 
   it('hands the server\'s Date to the clock', async () => {

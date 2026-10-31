@@ -1,4 +1,5 @@
 import { isRoomId } from './code.js';
+import { isObj } from './repair.js';
 
 // The rooms API as sync uses it: a POST makes a room (the server picks its id), a scan reads every key, a GET one key,
 // a PUT writes one. Every failure is a RoomError with the HTTP status (0: no response at all), so the engine can
@@ -35,9 +36,6 @@ export interface HttpDeps {
 
 /** A stalled request must not hold up sync, the UI operations behind it, or other tabs waiting on the sync lock. */
 const TIMEOUT = 15_000;
-
-type Obj = Record<string, unknown>;
-const isObj = (x: unknown): x is Obj => typeof x === 'object' && x !== null && !Array.isArray(x);
 
 const ROOMS = '/api/rooms';
 

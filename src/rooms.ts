@@ -10,6 +10,9 @@ export class RoomError extends Error {
   }
 }
 
+/** An answer that there is no such room: 404, or 400 for an id the server refuses. */
+export const isMissingRoom = (e: unknown): e is RoomError => e instanceof RoomError && (e.status === 404 || e.status === 400);
+
 export interface RoomApi {
   create(): Promise<string>;
   /** Every key of the room. 404: no such room. fresh: past any cache on the way, which may keep a 404 for minutes. */

@@ -9,7 +9,7 @@ import { isLive, mergeRecords, ownsRoom, recordsIn, roomRecord, type Records } f
 import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, writtenOnce, type Put } from './plan.js';
 import { RoomHealth } from './health.js';
 import { forwardsFrom, scanRoom, type Landing } from './reads.js';
-import { RoomError, type RoomApi } from './rooms.js';
+import { RoomError, isMissingRoom, type RoomApi } from './rooms.js';
 import { StatusTracker, type ItemChip, type SyncProblem, type SyncState, type SyncStatus } from './status.js';
 import {
   adoptAccount, expire, followRoom, forwardDone, isAccountRoom, joinRoom, leaveRoom, oldestTombstone, placed, placements, purgeDone, purgeRecord, queueForward,
@@ -472,7 +472,7 @@ export class Sync<R, A = undefined> {
     }
     let remote: Snapshot;
     try { remote = await scanRoom(this.api, room); } catch (e) {
-      if (e instanceof RoomError && (e.status === 404 || e.status === 400)) { this.health.missing(room, e.status); return null; }
+      if (isMissingRoom(e)) { this.health.missing(room, e.status); return null; }
       throw e;
     }
     this.health.scanned(room, remote);
@@ -539,7 +539,7 @@ export class Sync<R, A = undefined> {
           this.health.refused(put.room);
           return false;
         }
-        if (e.status === 404 || e.status === 400) { this.health.missing(put.room, e.status); return false; }
+        if (isMissingRoom(e)) { this.health.missing(put.room, e.status); return false; }
         throw e;
       }
     }
@@ -562,7 +562,7 @@ export class Sync<R, A = undefined> {
     if (!room || this.health.lost) return;
     for (const key of Object.keys(this.local.store.purge)) {
       try { await this.api.delete(room, key); } catch (e) {
-        if (e instanceof RoomError && (e.status === 404 || e.status === 400)) { this.health.missing(room, e.status); return; }
+        if (isMissingRoom(e)) { this.health.missing(room, e.status); return; }
         throw e;
       }
       this.local.edit(s => purgeDone(s, key), 'sync');
@@ -598,7 +598,7 @@ export class Sync<R, A = undefined> {
       if (from !== to) {
         try { await this.api.put(from, FORWARD_KEY, forwardDoc(to, tick(this.local.store.clock, this.local.now()))); } catch (e) {
           // A room that is gone, or refused, has nobody left to follow a forward.
-          if (!(e instanceof RoomError) || (e.status !== 404 && e.status !== 400)) throw e;
+          if (!isMissingRoom(e)) throw e;
         }
       }
       this.local.edit(st => forwardDone(st, from), 'sync');

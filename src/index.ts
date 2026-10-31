@@ -29,8 +29,9 @@ export {
   Local, Persist, bootStore, browserStorage, memoryStorage, newerStore, readStore, storageName,
   type LocalEnv, type Source, type Storage, type StoreListener,
 } from './local.js';
+export { browserEnv, listen, webLock } from './browser.js';
 export {
-  LOST_GAP, Sync, SyncError, browserEnv, listen, webLock,
+  LOST_GAP, Sync, SyncError,
   type Feed, type ItemChip, type Linked, type Peek, type Shared, type SyncEnv, type SyncEvents, type SyncFailure, type SyncLock, type SyncProblem, type SyncState,
   type SyncStatus,
 } from './sync.js';

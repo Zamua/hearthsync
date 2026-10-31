@@ -36,8 +36,11 @@ const TIMEOUT = 15_000;
 type Obj = Record<string, unknown>;
 const isObj = (x: unknown): x is Obj => typeof x === 'object' && x !== null && !Array.isArray(x);
 
+const ROOMS = '/api/rooms';
+
 /** Keys like `note/<id>` travel as path segments: a slash encoded as %2F may be refused or rewritten on the way. */
 const keyPath = (key: string): string => key.split('/').map(encodeURIComponent).join('/');
+const roomPath = (room: string, key?: string): string => (key === undefined ? `${ROOMS}/${room}` : `${ROOMS}/${room}/${keyPath(key)}`);
 
 let reads = 0;
 /** A query no cache holds an answer for: an edge cache keys on it, and the server ignores it. */
@@ -70,24 +73,24 @@ export function httpRooms(origin: string, deps: HttpDeps = {}): RoomApi {
   const written = (text: string): void => { if (text !== '') throw new RoomError(502); };
   return {
     async create() {
-      const o = json(await call('/api/rooms', { method: 'POST' }));
+      const o = json(await call(ROOMS, { method: 'POST' }));
       if (!isObj(o) || !isRoomId(o.id)) throw new RoomError(502);
       return o.id;
     },
     async scan(room, o) {
-      const got = json(await call(`/api/rooms/${room}${o?.fresh ? fresh() : ''}`));
+      const got = json(await call(`${roomPath(room)}${o?.fresh ? fresh() : ''}`));
       // A room, even an empty one, scans as an object; anything else came from something in the way, like a captive portal.
       if (!isObj(got)) throw new RoomError(502);
       return got;
     },
     async get(room, key) {
-      return json(await call(`/api/rooms/${room}/${keyPath(key)}`));
+      return json(await call(roomPath(room, key)));
     },
     async put(room, key, value, o) {
-      written(await call(`/api/rooms/${room}/${keyPath(key)}`, { method: 'PUT', body: JSON.stringify(value), ...(o?.keepalive ? { keepalive: true } : {}) }));
+      written(await call(roomPath(room, key), { method: 'PUT', body: JSON.stringify(value), ...(o?.keepalive ? { keepalive: true } : {}) }));
     },
     async delete(room, key) {
-      written(await call(`/api/rooms/${room}/${keyPath(key)}`, { method: 'DELETE' }));
+      written(await call(roomPath(room, key), { method: 'DELETE' }));
     },
   };
 }

@@ -104,9 +104,9 @@ export class Sync<R, A = undefined> {
   private held = false;
   /** An account round was passed over while held. */
   private deferred = false;
-  private health: RoomHealth;
-  private backoff: Backoff;
-  private tracker: StatusTracker;
+  private readonly health: RoomHealth;
+  private readonly backoff: Backoff;
+  private readonly tracker: StatusTracker;
 
   constructor(private local: Local<R, A>, private api: RoomApi, private env: SyncEnv, private lock: SyncLock = fn => fn()) {
     this.health = new RoomHealth(() => env.now(), () => local.store.account);

@@ -38,7 +38,8 @@ The app describes its records with a `Model`. Each record lives at its own room 
 and has a `Kind`: how it reads from untrusted JSON, how two copies merge, and the highest stamp it carries. The
 library does everything else: storage, the outbox, rounds against the server, acknowledgements, status chips, links,
 merges and forwards. The room keys `account` (the manifest), `shared` (the rooms of shared records) and `forward` are
-the library's: a model's `kind` is never asked about them, so an app cannot use them.
+the library's, and so are `meta` and `acks`, the names the local store keeps its own state under: a model's `kind` is
+never asked about them, so an app cannot use them.
 
 ```ts
 import { Local, Sync, browserEnv, browserStorage, gsetFrom, gsetMerge, httpRooms, isObj, listen, lww, putRecord, regFrom, webLock } from 'hearthsync';

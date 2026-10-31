@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+Changed:
+
+- A model's `kind` is never asked about `meta` or `acks` either: a record at either key was kept in local storage under
+  the store's own meta or acks.
+
 ## 0.3.1
 
 Fixed:

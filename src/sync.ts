@@ -4,6 +4,7 @@ import { codeFromRoom, isRoomId, parseCode, type CodeError } from './code.js';
 import { tick } from './crdt.js';
 import { resolveForward, tagOf } from './identity.js';
 import type { Local } from './local.js';
+import type { Snapshot } from './model.js';
 import { isLive, kindOf, mergeRecords, ownsRoom, recordsIn, roomRecord, type Records } from './records.js';
 import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, writtenOnce, type Put } from './plan.js';
 import { RoomHealth } from './health.js';
@@ -72,7 +73,6 @@ export interface Feed { readonly ready: boolean; readonly kv: ReadonlyMap<string
 /** Runs fn while no other tab syncs. */
 export type SyncLock = <T>(fn: () => Promise<T>) => Promise<T>;
 
-type Snapshot = Record<string, unknown>;
 type Listener<K extends keyof SyncEvents> = (v: SyncEvents[K]) => void;
 
 const without = (o: Snapshot, key: string): Snapshot => { const { [key]: _, ...rest } = o; return rest; };
@@ -487,7 +487,7 @@ export class Sync<R, A = undefined> {
   private async readKeys(room: string, keys: readonly string[]): Promise<Snapshot | null> {
     const held = this.health.holds(room);
     if (keys.length > LIGHT_MAX || !held || !keys.every(k => held.has(k))) return null;
-    const remote: Snapshot = {};
+    const remote: Record<string, unknown> = {};
     for (const k of keys) {
       try { remote[k] = await this.api.get(room, k); } catch (e) {
         if (e instanceof RoomError && e.status === 404) return null;

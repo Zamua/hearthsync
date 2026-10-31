@@ -1,4 +1,5 @@
 import { FORWARD_KEY, ACCOUNT_KEY, forwardDoc, forwardFrom } from './account.js';
+import { Backoff } from './backoff.js';
 import { codeFromRoom, isRoomId, parseCode, type CodeError } from './code.js';
 import { canon, tick } from './crdt.js';
 import { resolveForward, tagOf } from './identity.js';
@@ -25,13 +26,6 @@ const FULL_EVERY = 5 * 60_000, AWAY = 60_000;
 const LIGHT_MAX = 4;
 /** Rounds over every room until one moves nothing; bounded, as two devices clobbering each other can keep it busy. */
 const MAX_LAPS = 4;
-const BACKOFF_MIN = 2000, BACKOFF_MAX = 5 * 60_000, PAUSE_FULL = 30 * 60_000, RATE_MAX = 3600;
-/**
- * A rooms server may send its whole rate window (an hour) as Retry-After, though a slot may free much sooner: the first
- * wait is capped at this many seconds for one early retry, and only a second 429 in a row is waited out in full.
- */
-const RATE_FIRST = 300;
-const FAILING = 3;
 /** A save counts as backlog (worth a notice when it lands) if it waited this long, or while the device could not save. */
 const BACKLOG = 2 * 60_000;
 /** Browsers cap the bodies of keepalive requests in flight (64 KiB). */
@@ -121,13 +115,7 @@ export class Sync<R, A = undefined> {
   private debounce: unknown = null;
   private firstChange: number | null = null;
   private periodic: unknown = null;
-  private failures = 0;
-  private backoffUntil = 0;
   private netDown = false;
-  private pausedUntil = 0;
-  private createBlockedUntil = 0;
-  /** 429s in a row from the account room's POST. */
-  private rateHits = 0;
   /** Account rooms that are the landing of a forward cycle: their own forward is ignored. */
   private cycleHeads = new Set<string>();
   /** Records not yet saved, by key: since when, and whether the device was offline or failing meanwhile. */
@@ -151,9 +139,11 @@ export class Sync<R, A = undefined> {
   /** An account round was passed over while held. */
   private deferred = false;
   private health: RoomHealth;
+  private backoff: Backoff;
 
   constructor(private local: Local<R, A>, private api: RoomApi, private env: SyncEnv, private lock: SyncLock = fn => fn()) {
-    this.health = new RoomHealth(env.now, () => local.store.account);
+    this.health = new RoomHealth(() => env.now(), () => local.store.account);
+    this.backoff = new Backoff(() => env.random());
     local.on((_next, _prev, source) => {
       this.touch();
       if (source !== 'sync') this.changed();
@@ -210,8 +200,7 @@ export class Sync<R, A = undefined> {
   /** The connection is back: sync now, past any backoff. */
   online(): void {
     this.netDown = false;
-    this.failures = 0;
-    this.backoffUntil = 0;
+    this.backoff.clear();
     this.schedule(0, true, true);
     this.touch();
   }
@@ -436,7 +425,7 @@ export class Sync<R, A = undefined> {
   private schedule(ms: number, full = false, force = false): void {
     if (full) this.wantFull = true;
     if (!this.started) return;
-    const now = this.env.now(), at = Math.max(now + ms, force ? 0 : this.backoffUntil, this.pausedUntil);
+    const now = this.env.now(), at = Math.max(now + ms, this.backoff.earliest(force));
     if (this.passTimer !== null) {
       if (this.passAt <= at) return;
       this.env.clearTimer(this.passTimer);
@@ -456,7 +445,7 @@ export class Sync<R, A = undefined> {
   }
 
   private async pass(full: boolean): Promise<void> {
-    if (this.env.now() < this.pausedUntil || !this.env.online()) { this.touch(); return; }
+    if (this.backoff.paused(this.env.now()) || !this.env.online()) { this.touch(); return; }
     this.madeAccount = false;
     try {
       this.local.edit((s, now) => expire(this.m, s, now), 'sync');
@@ -472,8 +461,7 @@ export class Sync<R, A = undefined> {
       }
       await this.purgeKeys();
       await this.writeForwards();
-      this.failures = 0;
-      this.backoffUntil = 0;
+      this.backoff.clear();
       this.netDown = false;
       if (!dirty(this.m, this.local.store).length) this.savedAt = this.env.now();
     } catch (e) {
@@ -704,19 +692,13 @@ export class Sync<R, A = undefined> {
     // A newer build's store whose account this build cannot read: a room made here would split the account.
     if (this.local.newer) return;
     // An earlier pass may have taken the place of the retry's timer: keep the retry.
-    if (now < this.createBlockedUntil) { this.schedule(this.createBlockedUntil - now); return; }
+    if (now < this.backoff.createAt) { this.schedule(this.backoff.createAt - now); return; }
     let room: string;
     try { room = await this.api.create(); } catch (e) {
-      if (e instanceof RoomError && e.status === 429) {
-        const wait = Math.min(e.retryAfter ?? RATE_MAX, RATE_MAX), ms = (this.rateHits++ ? wait : Math.min(wait, RATE_FIRST)) * 1000;
-        this.createBlockedUntil = now + ms;
-        this.schedule(ms);
-        return;
-      }
+      if (e instanceof RoomError && e.status === 429) { this.schedule(this.backoff.createRefused(e, now)); return; }
       throw e;
     }
-    this.createBlockedUntil = 0;
-    this.rateHits = 0;
+    this.backoff.created();
     // Another tab may have adopted an account while the POST was out; this room then stays empty.
     this.local.reload();
     if (this.local.store.account) return;
@@ -727,20 +709,9 @@ export class Sync<R, A = undefined> {
   }
 
   private failed(e: unknown): void {
-    const now = this.env.now();
-    if (e instanceof RoomError && e.status === 507) { this.pausedUntil = now + PAUSE_FULL; this.schedule(PAUSE_FULL); return; }
-    if (e instanceof RoomError && e.status === 429) {
-      const ms = Math.min(e.retryAfter ?? 60, RATE_MAX) * 1000;
-      this.backoffUntil = now + ms;
-      this.schedule(ms);
-      return;
-    }
     if (!(e instanceof RoomError)) console.warn('sync:', e);
     else if (e.status === 0) this.netDown = true;
-    this.failures++;
-    const ms = Math.min(BACKOFF_MAX, BACKOFF_MIN * 2 ** (this.failures - 1)) * (0.5 + this.env.random() * 0.5);
-    this.backoffUntil = now + ms;
-    this.schedule(ms);
+    this.schedule(this.backoff.failed(e, this.env.now()));
   }
 
   /**
@@ -764,8 +735,7 @@ export class Sync<R, A = undefined> {
   /** A round against a room's fed copy, when a pass could run; another device's changes it brings are owed to the account room. */
   private async feedRound(room: string): Promise<void> {
     await this.exclusive(async () => {
-      const now = this.env.now();
-      if (!this.started || !this.env.online() || now < this.pausedUntil || now < this.backoffUntil || this.health.isOut(room)) return;
+      if (!this.started || !this.env.online() || this.backoff.blocked(this.env.now()) || this.health.isOut(room)) return;
       if (!this.feeds.get(room)?.ready || room === this.local.store.account) return;
       const fed = this.fedRead(room), before = this.local.store.records;
       try { await (fed ? this.apply(room, fed.remote, fed.keys) : this.round(room, false)); } catch (e) { this.failed(e); }
@@ -775,7 +745,7 @@ export class Sync<R, A = undefined> {
 
   /** Dirty docs, sent without reading first, as keepalive requests the browser finishes after the page is gone. */
   private async flush(): Promise<void> {
-    if (!this.env.online() || this.env.now() < this.pausedUntil) return;
+    if (!this.env.online() || this.backoff.paused(this.env.now())) return;
     let bytes = 0;
     const puts = dirty(this.m, this.local.store).filter(p => this.health.takes(p.room, p.key)).filter(p => (bytes += JSON.stringify(p.value).length) <= KEEPALIVE_BYTES);
     await Promise.all(puts.map(p => this.push([p], true).catch(() => 0)));
@@ -876,9 +846,9 @@ export class Sync<R, A = undefined> {
   private problem(): SyncProblem | null {
     const now = this.env.now();
     if (this.health.lost) return 'lost';
-    if (this.health.anyFull || now < this.pausedUntil) return 'full';
-    if (this.failures >= FAILING && this.env.online()) return 'failing';
-    if (!this.local.store.account && now < this.createBlockedUntil) return 'rate';
+    if (this.health.anyFull || this.backoff.paused(now)) return 'full';
+    if (this.backoff.failing && this.env.online()) return 'failing';
+    if (!this.local.store.account && now < this.backoff.createAt) return 'rate';
     return null;
   }
 
@@ -894,7 +864,7 @@ export class Sync<R, A = undefined> {
       tag: s.profile ? tagOf(s.profile.pid) : null,
       items, unsaved: c.unsaved,
       savedAt: this.savedAt, newer: this.newer || this.local.newer,
-      retryAt: problem === 'rate' ? this.createBlockedUntil : null,
+      retryAt: problem === 'rate' ? this.backoff.createAt : null,
       gone: Object.keys(placed(this.m, s)).filter(k => { const r = roomOf(this.m, s, k); return r !== null && this.health.isGone(r); }).sort(),
     };
   }

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { codeFromRoom } from '../src/code.js';
 import { gsetList } from '../src/crdt.js';
 import { Local, memoryStorage, readStore } from '../src/local.js';
@@ -6,6 +6,7 @@ import type { Model } from '../src/model.js';
 import { adoptAccount } from '../src/store.js';
 import { device, fakeWorld } from '../src/testing/index.js';
 import { LAST_V1, NOTES_V1, here, notes, notesHere, notesOf, openNote, writeNote, type Here, type Note } from './models.js';
+import { cutShort } from './storage.js';
 
 const META = 'notes.v2.meta', ROOM = '11111111-1111-4111-8111-111111111111';
 const env = (t = 1_790_400_000_000) => ({ now: () => t });
@@ -27,13 +28,16 @@ describe("the app's own state in the meta", () => {
   });
 
   it('is written with the meta, in the same write, after the records an edit changed', () => {
-    const st = memoryStorage(), l = new Local(st, notesHere, env());
-    const set = vi.spyOn(st, 'set');
+    const st = cutShort(), l = new Local(st, notesHere, env());
+    st.writes = 1;
     l.edit((s, now) => openNote(writeNote(s, 'a', 'milk', now), 'a', now));
-    expect(set.mock.calls.map(c => c[0])).toEqual(['notes.v2.note.a', META]);
-    set.mockClear();
+    // Cut short after one write: the record landed, and the meta holding the app's state, after it, did not.
+    const cut = readStore(st, notesHere)!;
+    expect([notesOf(cut), gsetList(cut.app.opened)]).toEqual([{ a: { text: 'milk', tags: [] } }, []]);
+    st.writes = 1;
     open(l, 'b');
-    expect(set.mock.calls.map(c => c[0])).toEqual([META]);
+    // An edit of the app's state alone is one write, of the meta.
+    expect([gsetList(readStore(st, notesHere)!.app.opened), meta(st).last]).toEqual([['a', 'b'], 'b']);
   });
 
   it("keeps the library's fields over any of the app's named the same", () => {

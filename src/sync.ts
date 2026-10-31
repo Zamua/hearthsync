@@ -159,6 +159,8 @@ export class Sync<R, A = undefined> {
   private refreshQueued = false;
   private refreshedAt = -Infinity;
   private feeds = new Map<string, Feed>();
+  /** Shares in flight by record key: a second share of a record waits on the first, so the record gets one room. */
+  private sharing = new Map<string, Promise<string>>();
   private feedTimers = new Map<string, unknown>();
   private held = false;
   /** An account round was passed over while held. */
@@ -289,17 +291,32 @@ export class Sync<R, A = undefined> {
    * uploaded. The room id is the invite. Sharing again returns the same room.
    */
   share(key: string): Promise<string> {
+    let p = this.sharing.get(key);
+    if (!p) {
+      p = this.shareOnce(key).finally(() => this.sharing.delete(key));
+      this.sharing.set(key, p);
+    }
+    return p;
+  }
+
+  private shareOnce(key: string): Promise<string> {
+    const usable = (room: string | null | undefined): room is string => !!room && !this.gone.has(room) && !this.dropped.has(room);
     return this.op(async () => {
       this.local.reload();
       const s = this.local.store, r = s.records[key];
       if (r === undefined || !ownsRoom(this.m, key) || !isLive(this.m, key, r)) throw new SyncError('notfound');
       let room = roomOf(this.m, s, key);
-      if (!room || this.gone.has(room) || this.dropped.has(room)) {
+      if (!usable(room)) {
         const made = await this.api.create();
-        this.local.edit((st, now) => shareRecord(this.m, st, key, made, now), 'sync');
-        this.scanned(made, {});
-        await this.apply(made, {});
-        room = made;
+        // Another tab may have shared the record while the POST was out; its room wins and this one stays empty.
+        this.local.reload();
+        room = roomOf(this.m, this.local.store, key);
+        if (!usable(room)) {
+          this.local.edit((st, now) => shareRecord(this.m, st, key, made, now), 'sync');
+          this.scanned(made, {});
+          await this.apply(made, {});
+          room = made;
+        }
       }
       for (let i = 0; i < MAX_LAPS && this.roomDirty(room); i++) await this.round(room, true);
       if (this.unsaved(room)) throw new SyncError(this.full.has(room) ? 'full' : 'failed');

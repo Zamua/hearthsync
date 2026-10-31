@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+Fixed:
+
+- Two shares of one record at once made two rooms, and the record kept only the later one. A second share now waits on
+  the first, and a share whose POST was out while another tab shared the record keeps that tab's room.
+- `httpRooms` took a scan answered with something other than a JSON object (a captive portal's page) for an empty
+  room, and a PUT or DELETE answered with a body for a landed write. Both are now `RoomError(502)`.
+
 ## 0.3.0
 
 Added:

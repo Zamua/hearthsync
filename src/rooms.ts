@@ -66,6 +66,8 @@ export function httpRooms(origin: string, deps: HttpDeps = {}): RoomApi {
     try { return await Promise.race([answer(), expired]); } finally { clearTimeout(timer); }
   };
   const json = (text: string): unknown => { try { return JSON.parse(text); } catch { return text; } };
+  /** A write answers with no body; one that has a body came from something in the way, so the write is not known to have landed. */
+  const written = (text: string): void => { if (text !== '') throw new RoomError(502); };
   return {
     async create() {
       const o = json(await call('/api/rooms', { method: 'POST' }));
@@ -74,16 +76,18 @@ export function httpRooms(origin: string, deps: HttpDeps = {}): RoomApi {
     },
     async scan(room, o) {
       const got = json(await call(`/api/rooms/${room}${o?.fresh ? fresh() : ''}`));
-      return isObj(got) ? got : {};
+      // A room, even an empty one, scans as an object; anything else came from something in the way, like a captive portal.
+      if (!isObj(got)) throw new RoomError(502);
+      return got;
     },
     async get(room, key) {
       return json(await call(`/api/rooms/${room}/${keyPath(key)}`));
     },
     async put(room, key, value, o) {
-      await call(`/api/rooms/${room}/${keyPath(key)}`, { method: 'PUT', body: JSON.stringify(value), ...(o?.keepalive ? { keepalive: true } : {}) });
+      written(await call(`/api/rooms/${room}/${keyPath(key)}`, { method: 'PUT', body: JSON.stringify(value), ...(o?.keepalive ? { keepalive: true } : {}) }));
     },
     async delete(room, key) {
-      await call(`/api/rooms/${room}/${keyPath(key)}`, { method: 'DELETE' });
+      written(await call(`/api/rooms/${room}/${keyPath(key)}`, { method: 'DELETE' }));
     },
   };
 }

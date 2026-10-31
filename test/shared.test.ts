@@ -56,6 +56,27 @@ describe('sharing a record', () => {
     expect(host.requests('POST')).toHaveLength(2);
   });
 
+  it('makes one room when two shares of a record overlap', async () => {
+    const { host, clock } = fakeWorld(), a = await backedUp(host, clock, 'a');
+    const posts = host.requests('POST').length;
+    const [first, second] = await Promise.all([a.sync.share(B1), a.sync.share(B1)]);
+    expect(second).toBe(first);
+    expect(host.requests('POST')).toHaveLength(posts + 1);
+    await a.sync.sync();
+    expect(host.snapshot(account(a)).shared).toMatchObject({ rooms: { [B1]: { val: first } } });
+  });
+
+  it('keeps the room another tab made while its own POST was out', async () => {
+    const { host, clock } = fakeWorld(), a = await backedUp(host, clock, 'a'), tab = device(host, clock, boards, 'a2', a.storage);
+    a.stall = /^POST /;
+    const slow = a.sync.share(B1);
+    const room = await tab.sync.share(B1);
+    a.release();
+    expect(await slow).toBe(room);
+    await a.sync.sync();
+    expect(host.snapshot(account(a)).shared).toMatchObject({ rooms: { [B1]: { val: room } } });
+  });
+
   it('works before the account room exists, which then lists it', async () => {
     const { host, clock } = fakeWorld(), a = device(host, clock, boards, 'a');
     edit(a, B1, { title: 'early' });

@@ -12,8 +12,8 @@ import { forwardsFrom, scanRoom, type Landing } from './reads.js';
 import { RoomError, type RoomApi } from './rooms.js';
 import { StatusTracker, type ItemChip, type SyncProblem, type SyncState, type SyncStatus } from './status.js';
 import {
-  adoptAccount, expire, followRoom, forwardDone, isAccountRoom, joinRoom, leaveRoom, oldestTombstone, placed, purgeDone, purgeRecord, queueForward, roomOf,
-  shareRecord, sharedKey, switchAccount, type LocalStore,
+  adoptAccount, expire, followRoom, forwardDone, isAccountRoom, joinRoom, leaveRoom, oldestTombstone, placed, placements, purgeDone, purgeRecord, queueForward,
+  roomOf, shareRecord, sharedKey, switchAccount, type LocalStore,
 } from './store.js';
 
 // The sync engine: the device's store, its account room and the rooms of its shared records, reconciled in the
@@ -731,8 +731,8 @@ export class Sync<R, A = undefined> {
 
   /** The shared record this device holds in a room. */
   private byRoom(room: string): Shared<R> | null {
-    const s = this.local.store, key = Object.keys(placed(this.m, s)).find(k => roomOf(this.m, s, k) === room);
-    return key === undefined ? null : { key, room, record: s.records[key]! };
+    const p = placements(this.m, this.local.store).find(x => x.room === room);
+    return p ? { key: p.key, room, record: p.record } : null;
   }
 
   /** Keys of the room still to upload that the server can take now. */
@@ -769,7 +769,7 @@ export class Sync<R, A = undefined> {
       items, unsaved: c.unsaved,
       savedAt: this.savedAt, newer: this.newer || this.local.newer,
       retryAt: problem === 'rate' ? this.backoff.createAt : null,
-      gone: Object.keys(placed(this.m, s)).filter(k => { const r = roomOf(this.m, s, k); return r !== null && this.health.isGone(r); }).sort(),
+      gone: placements(this.m, s).filter(p => this.health.isGone(p.room)).map(p => p.key).sort(),
     };
   }
 }

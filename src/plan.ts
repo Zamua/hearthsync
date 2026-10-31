@@ -1,11 +1,11 @@
 import { ACCOUNT_KEY, DOC, FORWARD_KEY, SHARED_KEY, SHARED_LEFT, accountDoc, accountFrom, forwardFrom, isNewer, mergeAccount, sharedDoc, sharedFrom } from './account.js';
 import { canon, hash, regsMerge } from './crdt.js';
-import type { Model, Snapshot } from './model.js';
+import type { Model, RoomLayout, Snapshot } from './model.js';
 import {
-  docOf, docsOf, homeKind, isLive, keepsRegister, kindOf, leavesOnDelete, mergeRecords, ownsRoom, recordsIn, roomRead, sharedKind, stampOf, tombstoneOf,
-  versionOf, type MergeMode, type Records,
+  docOf, docsOf, isLive, keepsRegister, kindOf, leaves, mergeRecords, ownsRoom, recordsIn, roomRead, sharedKind, stampOf, tombstoneOf, versionOf,
+  type MergeMode, type Records,
 } from './records.js';
-import { placed, roomOf, sharedStamp, type LocalStore } from './store.js';
+import { placed, placements, sharedStamp, type LocalStore } from './store.js';
 
 // Sync as data: what each room should hold (the projection), what the server has not confirmed (the derived outbox),
 // and one round's merge of a read into the store (the plan). The engine only fetches, PUTs and acknowledges. Rooms are
@@ -40,11 +40,10 @@ export function accountDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): Re
  */
 function sharedDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const key of Object.keys(placed(m, s))) {
-    if (roomOf(m, s, key) !== room) continue;
-    const r = s.records[key]!, layout = homeKind(m, key)!.layout;
-    if (layout) Object.assign(out, layout.docs(r));
-    else if (isLive(m, key, r) || !leavesOnDelete(m, key)) out[key] = docOf(m, key, r);
+  for (const p of placements(m, s)) {
+    if (p.room !== room) continue;
+    if (p.kind.layout) Object.assign(out, p.kind.layout.docs(p.record));
+    else if (isLive(m, p.key, p.record) || !leaves(p.kind)) out[p.key] = docOf(m, p.key, p.record);
   }
   return out;
 }
@@ -52,7 +51,7 @@ function sharedDocs<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: strin
 /** Whether a key of the room is one its records' layouts write once; never in the account room. */
 export function writtenOnce<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string): (key: string) => boolean {
   if (room === s.account) return () => false;
-  const layouts = Object.keys(placed(m, s)).filter(k => roomOf(m, s, k) === room).map(k => homeKind(m, k)!.layout?.once).filter(f => !!f);
+  const layouts = placements(m, s).filter(p => p.room === room).map(p => p.kind.layout?.once).filter(f => !!f);
   return key => layouts.some(f => f(key));
 }
 
@@ -70,9 +69,9 @@ const clean = <R, A>(s: LocalStore<R, A>, room: string, key: string, doc: unknow
 };
 
 /** Whether a laid out record's keys are all saved in its room. */
-function laidClean<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string, room: string): boolean {
+function laidClean<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: string, layout: RoomLayout<R>, r: R): boolean {
   const once = writtenOnce(m, s, room);
-  return Object.entries(homeKind(m, key)!.layout!.docs(s.records[key]!)).every(([k, d]) => clean(s, room, k, d, once(k)));
+  return Object.entries(layout.docs(r)).every(([k, d]) => clean(s, room, k, d, once(k)));
 }
 
 /**
@@ -82,15 +81,13 @@ function laidClean<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, key: string,
  */
 export function roomsOf<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>): string[] {
   const out = new Set(s.account ? [s.account] : []);
-  for (const key of Object.keys(placed(m, s))) {
-    const room = roomOf(m, s, key);
-    if (room === null || out.has(room)) continue;
-    const r = s.records[key]!, layout = homeKind(m, key)!.layout;
+  for (const { key, room, record: r, kind } of placements(m, s)) {
+    if (out.has(room)) continue;
     if (isLive(m, key, r)) out.add(room);
-    else if (layout) {
+    else if (kind.layout) {
       const uploaded = Object.keys(s.acks[room] ?? {}).length > 0;
-      if ((uploaded || layout.owes?.(r) !== false) && !laidClean(m, s, key, room)) out.add(room);
-    } else if (!leavesOnDelete(m, key) && !clean(s, room, key, docOf(m, key, r))) out.add(room);
+      if ((uploaded || kind.layout.owes?.(r) !== false) && !laidClean(m, s, room, kind.layout, r)) out.add(room);
+    } else if (!leaves(kind) && !clean(s, room, key, docOf(m, key, r))) out.add(room);
   }
   return [...out];
 }
@@ -199,10 +196,9 @@ export function plan<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, room: stri
     if (a) next = { ...next, profile: next.profile ? mergeAccount(next.profile, a) : a };
   } else {
     const here: Record<string, unknown> = {}, laid: Record<string, R> = {}, theirs = roomRead(m, read);
-    for (const key of Object.keys(placed(m, s))) {
-      if (roomOf(m, s, key) !== room) continue;
-      const layout = homeKind(m, key)!.layout;
-      if (layout) { const r = layout.read(theirs, key); if (r !== null) laid[key] = r; } else if (key in read) here[key] = read[key];
+    for (const p of placements(m, s)) {
+      if (p.room !== room) continue;
+      if (p.kind.layout) { const r = p.kind.layout.read(theirs, p.key); if (r !== null) laid[p.key] = r; } else if (p.key in read) here[p.key] = read[p.key];
     }
     next = mergeIn(m, s, here, 'absorb', undefined, { ...recordsIn(m, here), ...laid });
   }
@@ -248,13 +244,13 @@ export interface Chips {
  * record then follows the account room alone).
  */
 export function chips<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, skip: (room: string) => boolean = () => false): Chips {
-  const acc = s.account, items: Record<string, Chip> = {};
+  const acc = s.account, items: Record<string, Chip> = {}, byKey = new Map(placements(m, s).map(p => [p.key, p]));
   let unsaved = 0;
   for (const [key, doc] of Object.entries(docsOf(m, s.records))) {
     if (!isLive(m, key, s.records[key]!)) continue;
     let chip: Chip = !acc || s.acks[acc]?.[key] === undefined ? 'phone' : clean(s, acc, key, doc) ? 'saved' : 'waiting';
-    const room = chip === 'saved' && homeKind(m, key)!.layout ? roomOf(m, s, key) : null;
-    if (room !== null && !skip(room) && !laidClean(m, s, key, room)) chip = 'waiting';
+    const p = chip === 'saved' ? byKey.get(key) : undefined, layout = p?.kind.layout;
+    if (p && layout && !skip(p.room) && !laidClean(m, s, p.room, layout, p.record)) chip = 'waiting';
     items[key] = chip;
     if (chip !== 'saved') unsaved++;
   }

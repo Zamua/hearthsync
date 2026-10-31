@@ -1,6 +1,9 @@
 import type { Reg, Stamp } from './crdt.js';
 import type { LocalStore } from './store.js';
 
+/** The names under the prefix the local store keeps its own state in. A record is kept under its key, so neither is one. */
+export const META = 'meta', ACKS = 'acks';
+
 /** A room's keys as read, each to its parsed JSON. */
 export type Snapshot = Readonly<Record<string, unknown>>;
 
@@ -155,8 +158,8 @@ export interface Model<R, A = undefined> {
   purgeAfter?: number;
   /**
    * The kind of record a room key holds, the same object for every key of a kind (a cap counts by it); null for a key
-   * that is not the app's (and always for `account`, `shared` and `forward`). Keys hold no dot: a record is kept in
-   * local storage under its key with each `/` as a `.`.
+   * that is not the app's (and always for `account`, `shared`, `forward`, `meta` and `acks`). Keys hold no dot: a
+   * record is kept in local storage under its key with each `/` as a `.`.
    */
   kind(key: string): Kind<R> | null;
   /** The app's own state in the store's meta, on `LocalStore.app`. Without it, `app` is undefined. */

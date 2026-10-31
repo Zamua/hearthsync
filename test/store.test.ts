@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { publicId } from '../src/identity.js';
+import type { Model } from '../src/model.js';
+import { kindOf } from '../src/records.js';
 import { adoptAccount, editRecords, emptyStore, forwardDone, importRecords, moved, putRecord, queueForward, switchAccount, type LocalStore } from '../src/store.js';
-import { cellsOf, newPuzzle, notes, notesOf, puzzles, slotKey, solve, startOver, tagNote, writeNote, type Note, type Puzzle } from './models.js';
+import { cellsOf, newPuzzle, noteKind, notes, notesOf, puzzles, slotKey, solve, startOver, tagNote, writeNote, type Note, type Puzzle } from './models.js';
 
 const R = '11111111-2222-4333-8444-555555555555', W = '0f1e2d3c-4b5a-4978-8a9b-0c1d2e3f4a5b';
 const P1 = { run: 0, game: 'g1' };
@@ -22,6 +24,11 @@ describe('records in the store', () => {
 
   it('refuses a key that is not the model\'s', () => {
     expect(() => putRecord(notes, emptyStore<Note>(), 'meta', 1, (_h, t) => ({ id: 'x', text: { val: '', t }, tags: {}, u: t, deleted: 0 }))).toThrow();
+  });
+
+  it("never takes a name the library keeps, in a room or in storage, for a record's key, whatever the model says", () => {
+    const greedy: Model<Note> = { ...notes, kind: () => noteKind };
+    expect(['account', 'shared', 'forward', 'meta', 'acks', 'note/a'].map(k => kindOf(greedy, k) !== null)).toEqual([false, false, false, false, false, true]);
   });
 
   it('an edit of the records takes the next stamp, or leaves the store as it was', () => {

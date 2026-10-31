@@ -1,13 +1,13 @@
 import { DOC, isLibraryKey, isNewer } from './account.js';
 import { canon, type Reg, type Stamp } from './crdt.js';
-import { samePlay, type Kind, type Model, type Snapshot } from './model.js';
+import { ACKS, META, samePlay, type Kind, type Model, type Snapshot } from './model.js';
 
 // The app's records, one per room key, read, written and merged through the model's kinds.
 
 export type Records<R> = Readonly<Record<string, R>>;
 
-/** The kind of the record at a room key; null for keys that are not the app's. */
-export const kindOf = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => (isLibraryKey(key) ? null : m.kind(key));
+/** The kind of the record at a room key; null for keys that are not the app's, and always for the names the library keeps. */
+export const kindOf = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => (isLibraryKey(key) || key === META || key === ACKS ? null : m.kind(key));
 
 /** The kind of a key records live at: the app's, and not one an earlier build wrote. */
 export const homeKind = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => { const k = kindOf(m, key); return k && !k.home ? k : null; };

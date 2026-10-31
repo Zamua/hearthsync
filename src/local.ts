@@ -1,7 +1,7 @@
 import { accountFrom, isNewer, sharedRegs } from './account.js';
 import { isRoomId } from './code.js';
 import { isStamp } from './crdt.js';
-import type { Fold, Model } from './model.js';
+import { ACKS, META, type Fold, type Model } from './model.js';
 import { docOf, homeKind, keepsRegister, ownsRoom, stampOf, versionOf } from './records.js';
 import { isObj, type Obj } from './repair.js';
 import { emptyStore, sharedStamp, type LocalStore } from './store.js';
@@ -37,7 +37,6 @@ export function browserStorage(): Storage {
 
 /** The meta's format by default, and the oldest this reads: one above the model's is a newer build's. */
 const META_V = 2;
-const META = 'meta', ACKS = 'acks';
 const metaV = <R>(m: Model<R, unknown>): number => m.storeVersion ?? META_V;
 
 /** The app's state from a meta (`{}` when there is none); undefined for a model without a meta hook. */

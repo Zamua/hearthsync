@@ -5,6 +5,7 @@ import { resolveForward, tagOf } from './identity.js';
 import type { Local } from './local.js';
 import { isLive, kindOf, mergeRecords, ownsRoom, recordsIn, roomRecord, type Records } from './records.js';
 import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, writtenOnce, type Chip, type Put } from './plan.js';
+import { RoomHealth } from './health.js';
 import { RoomError, type RoomApi } from './rooms.js';
 import {
   adoptAccount, expire, followRoom, forwardDone, joinRoom, leaveRoom, oldestTombstone, placed, purgeDone, purgeRecord, queueForward, roomOf, shareRecord,
@@ -30,11 +31,6 @@ const BACKOFF_MIN = 2000, BACKOFF_MAX = 5 * 60_000, PAUSE_FULL = 30 * 60_000, RA
  * wait is capped at this many seconds for one early retry, and only a second 429 in a row is waited out in full.
  */
 const RATE_FIRST = 300;
-/**
- * The account room answering 404 across this long, with no answer from it between, is lost. Rooms never expire, so a
- * 404 is almost always a fault on the way, and an edge cache may keep one for minutes.
- */
-export const LOST_GAP = 10 * 60_000;
 const FAILING = 3;
 /** A save counts as backlog (worth a notice when it lands) if it waited this long, or while the device could not save. */
 const BACKLOG = 2 * 60_000;
@@ -132,19 +128,8 @@ export class Sync<R, A = undefined> {
   private createBlockedUntil = 0;
   /** 429s in a row from the account room's POST. */
   private rateHits = 0;
-  private accountMissingAt: number | null = null;
-  private lostAccount = false;
-  /** Shared rooms answering 404, since when; gone once that spans LOST_GAP, as for the account room. */
-  private sharedMissingAt = new Map<string, number>();
-  private gone = new Set<string>();
-  /** Rooms at their cap (413): until the next full scan, only keys already there are updated. */
-  private full = new Set<string>();
-  /** Rooms the server refuses as malformed (400). */
-  private dropped = new Set<string>();
   /** Account rooms that are the landing of a forward cycle: their own forward is ignored. */
   private cycleHeads = new Set<string>();
-  private scannedAt = new Map<string, number>();
-  private serverKeys = new Map<string, Set<string>>();
   /** Records not yet saved, by key: since when, and whether the device was offline or failing meanwhile. */
   private pending = new Map<string, { at: number; stuck: boolean }>();
   private landed = new Set<string>();
@@ -165,8 +150,10 @@ export class Sync<R, A = undefined> {
   private held = false;
   /** An account round was passed over while held. */
   private deferred = false;
+  private health: RoomHealth;
 
   constructor(private local: Local<R, A>, private api: RoomApi, private env: SyncEnv, private lock: SyncLock = fn => fn()) {
+    this.health = new RoomHealth(env.now, () => local.store.account);
     local.on((_next, _prev, source) => {
       this.touch();
       if (source !== 'sync') this.changed();
@@ -300,7 +287,7 @@ export class Sync<R, A = undefined> {
   }
 
   private shareOnce(key: string): Promise<string> {
-    const usable = (room: string | null | undefined): room is string => !!room && !this.gone.has(room) && !this.dropped.has(room);
+    const usable = (room: string | null | undefined): room is string => !!room && !this.health.isOut(room);
     return this.op(async () => {
       this.local.reload();
       const s = this.local.store, r = s.records[key];
@@ -313,13 +300,13 @@ export class Sync<R, A = undefined> {
         room = roomOf(this.m, this.local.store, key);
         if (!usable(room)) {
           this.local.edit((st, now) => shareRecord(this.m, st, key, made, now), 'sync');
-          this.scanned(made, {});
+          this.health.scanned(made, {});
           await this.apply(made, {});
           room = made;
         }
       }
       for (let i = 0; i < MAX_LAPS && this.roomDirty(room); i++) await this.round(room, true);
-      if (this.unsaved(room)) throw new SyncError(this.full.has(room) ? 'full' : 'failed');
+      if (this.unsaved(room)) throw new SyncError(this.health.isFull(room) ? 'full' : 'failed');
       this.soon();
       return room;
     });
@@ -354,7 +341,7 @@ export class Sync<R, A = undefined> {
         this.local.edit((s, now) => { got = joinRoom(this.m, s, w.room, w.snapshot, now); return typeof got === 'string' ? s : got.store; }, 'sync');
         if (got === 'full') throw new SyncError('full');
         if (got === 'none') throw new SyncError('notfound');
-        this.scanned(w.room, w.snapshot);
+        this.health.scanned(w.room, w.snapshot);
         // The record is this device's now: a failed upload is left to later passes.
         await this.upload(w.room, w.snapshot);
         this.changed();
@@ -401,12 +388,12 @@ export class Sync<R, A = undefined> {
       this.local.reload();
       const before = this.local.store.account, moved = a.room !== before;
       if (moved) {
-        const owed = before && !this.lostAccount ? before : null;
+        const owed = before && !this.health.lost ? before : null;
         this.local.edit((s, now) => {
           const next = joinAccount(this.m, switchAccount(s, a.room, now, this.m.salt).store, a.snapshot);
           return owed ? queueForward(next, owed) : next;
         }, 'sync');
-        this.scanned(a.room, a.snapshot);
+        this.health.scanned(a.room, a.snapshot);
       }
       return { pending: !await this.upload(a.room, moved ? a.snapshot : null) };
     });
@@ -436,7 +423,7 @@ export class Sync<R, A = undefined> {
     return this.op(async () => {
       const room = await this.api.create();
       this.local.edit((s, now) => switchAccount(s, room, now, this.m.salt).store, 'sync');
-      this.scanned(room, {});
+      this.health.scanned(room, {});
       await this.upload(room, {});
       const code = codeFromRoom(room);
       this.emit('account', { code });
@@ -506,7 +493,7 @@ export class Sync<R, A = undefined> {
   private next(done: ReadonlySet<string>): string | null {
     const acc = this.local.store.account;
     return roomsOf(this.m, this.local.store).find(r => {
-      if (done.has(r) || this.dropped.has(r) || this.gone.has(r)) return false;
+      if (done.has(r) || this.health.isOut(r)) return false;
       if (r === acc && this.held) { this.deferred = true; return false; }
       return true;
     }) ?? null;
@@ -521,7 +508,7 @@ export class Sync<R, A = undefined> {
   private async read(room: string, full: boolean): Promise<{ remote: Snapshot; keys?: string[] } | null> {
     const fed = this.fedRead(room);
     if (fed) return fed;
-    if (!full && this.env.now() - (this.scannedAt.get(room) ?? -Infinity) < FULL_EVERY) {
+    if (!full && this.env.now() - this.health.scannedAt(room) < FULL_EVERY) {
       const keys = dirty(this.m, this.local.store).filter(p => p.room === room).map(p => p.key);
       if (!keys.length) return null;
       const remote = await this.readKeys(room, keys);
@@ -529,10 +516,10 @@ export class Sync<R, A = undefined> {
     }
     let remote: Snapshot;
     try { remote = await this.scanRoom(room); } catch (e) {
-      if (e instanceof RoomError && (e.status === 404 || e.status === 400)) { this.missing(room, e.status); return null; }
+      if (e instanceof RoomError && (e.status === 404 || e.status === 400)) { this.health.missing(room, e.status); return null; }
       throw e;
     }
-    this.scanned(room, remote);
+    this.health.scanned(room, remote);
     return { remote };
   }
 
@@ -543,7 +530,7 @@ export class Sync<R, A = undefined> {
    * is left for the edge to keep.
    */
   private async readKeys(room: string, keys: readonly string[]): Promise<Snapshot | null> {
-    const held = this.serverKeys.get(room);
+    const held = this.health.holds(room);
     if (keys.length > LIGHT_MAX || !held || !keys.every(k => held.has(k))) return null;
     const remote: Snapshot = {};
     for (const k of keys) {
@@ -551,7 +538,7 @@ export class Sync<R, A = undefined> {
         if (e instanceof RoomError && e.status === 404) return null;
         throw e;
       }
-      this.answered(room);
+      this.health.answered(room);
     }
     return remote;
   }
@@ -562,21 +549,6 @@ export class Sync<R, A = undefined> {
       if (!(e instanceof RoomError) || e.status !== 404) throw e;
       return this.api.scan(room, { fresh: true });
     }
-  }
-
-  private scanned(room: string, remote: Snapshot): void {
-    this.scannedAt.set(room, this.env.now());
-    this.serverKeys.set(room, new Set(Object.keys(remote)));
-    // A full room may have room again (keys deleted elsewhere): new keys get one more try each full scan.
-    this.full.delete(room);
-    this.answered(room);
-  }
-
-  /** The room answered: any 404 before was a fault on the way, not a lost room. */
-  private answered(room: string): void {
-    if (room !== this.local.store.account) { this.sharedMissingAt.delete(room); this.gone.delete(room); return; }
-    this.accountMissingAt = null;
-    this.lostAccount = false;
   }
 
   /** Merges a read into the store and uploads what the server lacks: whether anything moved. */
@@ -599,15 +571,12 @@ export class Sync<R, A = undefined> {
   private async push(puts: readonly Put[], keepalive = false): Promise<number> {
     let sent = 0;
     for (const put of puts) {
-      if (!this.pushable(put)) continue;
+      if (!this.health.takes(put.room, put.key)) continue;
       if (!await this.putOne(put, keepalive)) continue;
       sent++;
       this.netDown = false;
-      this.answered(put.room);
+      this.health.wrote(put.room, put.key);
       this.local.edit(s => acknowledge(s, put.room, put.key, put.hash), 'sync');
-      const held = this.serverKeys.get(put.room);
-      if (held && !held.has(put.key)) this.full.delete(put.room);
-      held?.add(put.key);
     }
     return sent;
   }
@@ -619,10 +588,10 @@ export class Sync<R, A = undefined> {
         if (!(e instanceof RoomError)) throw e;
         if (e.status === 413) {
           if (!freed && !keepalive && await this.freeSlot(put.room, put.key)) { freed = true; continue; }
-          this.full.add(put.room);
+          this.health.refused(put.room);
           return false;
         }
-        if (e.status === 404 || e.status === 400) { this.missing(put.room, e.status); return false; }
+        if (e.status === 404 || e.status === 400) { this.health.missing(put.room, e.status); return false; }
         throw e;
       }
     }
@@ -630,7 +599,7 @@ export class Sync<R, A = undefined> {
 
   /** Deletes the oldest tombstone the account room holds, to make room for a new key: whether one went. */
   private async freeSlot(room: string, key: string): Promise<boolean> {
-    const held = this.serverKeys.get(room);
+    const held = this.health.holds(room);
     if (room !== this.local.store.account || !held || held.has(key)) return false;
     const drop = oldestTombstone(this.m, this.local.store, k => held.has(k));
     if (!drop) return false;
@@ -642,34 +611,15 @@ export class Sync<R, A = undefined> {
   /** Purged records' keys, deleted from the account room. */
   private async purgeKeys(): Promise<void> {
     const room = this.local.store.account;
-    if (!room || this.lostAccount) return;
+    if (!room || this.health.lost) return;
     for (const key of Object.keys(this.local.store.purge)) {
       try { await this.api.delete(room, key); } catch (e) {
-        if (e instanceof RoomError && (e.status === 404 || e.status === 400)) { this.missing(room, e.status); return; }
+        if (e instanceof RoomError && (e.status === 404 || e.status === 400)) { this.health.missing(room, e.status); return; }
         throw e;
       }
       this.local.edit(s => purgeDone(s, key), 'sync');
-      this.serverKeys.get(room)?.delete(key);
-      this.full.delete(room);
+      this.health.deleted(room, key);
     }
-  }
-
-  private pushable(put: Put): boolean {
-    if (this.dropped.has(put.room) || this.gone.has(put.room)) return false;
-    return !this.full.has(put.room) || !!this.serverKeys.get(put.room)?.has(put.key);
-  }
-
-  private missing(room: string, status: number): void {
-    if (status === 400) { this.dropped.add(room); console.warn(`sync: room ${room} refused as malformed; left out of sync`); return; }
-    const now = this.env.now();
-    if (room !== this.local.store.account) {
-      const since = this.sharedMissingAt.get(room);
-      if (since === undefined) this.sharedMissingAt.set(room, now);
-      else if (now - since >= LOST_GAP) this.gone.add(room);
-      return;
-    }
-    if (this.accountMissingAt === null) this.accountMissingAt = now;
-    else if (now - this.accountMissingAt >= LOST_GAP) this.lostAccount = true;
   }
 
   /**
@@ -684,8 +634,7 @@ export class Sync<R, A = undefined> {
     const prev = this.local.store;
     this.local.edit((s, now) => joinAccount(this.m, switchAccount(s, end.room, now, this.m.salt).store, end.snapshot), 'sync');
     this.tellNews(prev, this.local.store);
-    this.accountMissingAt = null;
-    this.lostAccount = false;
+    this.health.answered(end.room);
   }
 
   /** Where a chain of forwards from a scanned room ends, with that room's scan; null if it leads to a missing room. */
@@ -772,7 +721,7 @@ export class Sync<R, A = undefined> {
     this.local.reload();
     if (this.local.store.account) return;
     this.local.edit((st, t) => adoptAccount(st, room, t, this.m.salt), 'sync');
-    this.scanned(room, {});
+    this.health.scanned(room, {});
     this.madeAccount = true;
     this.emit('account', { code: codeFromRoom(room) });
   }
@@ -816,7 +765,7 @@ export class Sync<R, A = undefined> {
   private async feedRound(room: string): Promise<void> {
     await this.exclusive(async () => {
       const now = this.env.now();
-      if (!this.started || !this.env.online() || now < this.pausedUntil || now < this.backoffUntil || this.gone.has(room) || this.dropped.has(room)) return;
+      if (!this.started || !this.env.online() || now < this.pausedUntil || now < this.backoffUntil || this.health.isOut(room)) return;
       if (!this.feeds.get(room)?.ready || room === this.local.store.account) return;
       const fed = this.fedRead(room), before = this.local.store.records;
       try { await (fed ? this.apply(room, fed.remote, fed.keys) : this.round(room, false)); } catch (e) { this.failed(e); }
@@ -828,7 +777,7 @@ export class Sync<R, A = undefined> {
   private async flush(): Promise<void> {
     if (!this.env.online() || this.env.now() < this.pausedUntil) return;
     let bytes = 0;
-    const puts = dirty(this.m, this.local.store).filter(p => this.pushable(p)).filter(p => (bytes += JSON.stringify(p.value).length) <= KEEPALIVE_BYTES);
+    const puts = dirty(this.m, this.local.store).filter(p => this.health.takes(p.room, p.key)).filter(p => (bytes += JSON.stringify(p.value).length) <= KEEPALIVE_BYTES);
     await Promise.all(puts.map(p => this.push([p], true).catch(() => 0)));
   }
 
@@ -882,7 +831,7 @@ export class Sync<R, A = undefined> {
   }
 
   /** Keys of the room still to upload that the server can take now. */
-  private roomDirty(room: string): boolean { return dirty(this.m, this.local.store).some(p => p.room === room && this.pushable(p)); }
+  private roomDirty(room: string): boolean { return dirty(this.m, this.local.store).some(p => p.room === room && this.health.takes(p.room, p.key)); }
   /** Keys of the room still to upload, whether or not the server can take them now. */
   private unsaved(room: string): boolean { return dirty(this.m, this.local.store).some(p => p.room === room); }
 
@@ -926,15 +875,15 @@ export class Sync<R, A = undefined> {
 
   private problem(): SyncProblem | null {
     const now = this.env.now();
-    if (this.lostAccount) return 'lost';
-    if (this.full.size || now < this.pausedUntil) return 'full';
+    if (this.health.lost) return 'lost';
+    if (this.health.anyFull || now < this.pausedUntil) return 'full';
     if (this.failures >= FAILING && this.env.online()) return 'failing';
     if (!this.local.store.account && now < this.createBlockedUntil) return 'rate';
     return null;
   }
 
   private compute(): SyncStatus {
-    const s = this.local.store, problem = this.problem(), c = chips(this.m, s, r => this.gone.has(r) || this.dropped.has(r));
+    const s = this.local.store, problem = this.problem(), c = chips(this.m, s, r => this.health.isOut(r));
     const failing = problem === 'failing' || problem === 'full' || problem === 'lost';
     const items = Object.fromEntries(Object.entries(c.items).map(([k, chip]): [string, ItemChip] => [k, failing && s.account && chip !== 'saved' ? 'failed' : chip]));
     const online = this.env.online() && !this.netDown;
@@ -946,7 +895,7 @@ export class Sync<R, A = undefined> {
       items, unsaved: c.unsaved,
       savedAt: this.savedAt, newer: this.newer || this.local.newer,
       retryAt: problem === 'rate' ? this.createBlockedUntil : null,
-      gone: Object.keys(placed(this.m, s)).filter(k => { const r = roomOf(this.m, s, k); return r !== null && this.gone.has(r); }).sort(),
+      gone: Object.keys(placed(this.m, s)).filter(k => { const r = roomOf(this.m, s, k); return r !== null && this.health.isGone(r); }).sort(),
     };
   }
 }

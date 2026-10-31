@@ -4,7 +4,8 @@ import { publicId } from '../src/identity.js';
 import { memoryStorage } from '../src/local.js';
 import type { Model } from '../src/model.js';
 import { dirty } from '../src/plan.js';
-import { Sync, LOST_GAP, type SyncError } from '../src/sync.js';
+import { LOST_GAP } from '../src/health.js';
+import { Sync, type SyncError } from '../src/sync.js';
 import { device, fakeWorld, type Device, type FakeRooms, type TestClock } from '../src/testing/index.js';
 import { cellsOf, notes, notesOf, puzzles, slotKey, solve, startOver, tagNote, writeNote, type Note, type Puzzle } from './models.js';
 

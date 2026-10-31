@@ -4,7 +4,8 @@ import { canon, hash, lww, type Reg } from '../src/crdt.js';
 import { makeRng, type Rng } from '../src/rng.js';
 import { acknowledge, dirty, plan, roomDocs, roomsOf, type Plan } from '../src/plan.js';
 import { adoptAccount, emptyStore, followRoom, joinRoom, shareRecord, type LocalStore } from '../src/store.js';
-import { LOST_GAP, type SyncError } from '../src/sync.js';
+import { LOST_GAP } from '../src/health.js';
+import type { SyncError } from '../src/sync.js';
 import { device, fakeWorld, type Device, type FakeRooms, type TestClock } from '../src/testing/index.js';
 import { boardKey, boards, boardsOf, deleteBoard, editBoard, listKey, type Board } from './models.js';
 

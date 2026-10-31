@@ -4,12 +4,14 @@ import { Local, browserStorage, memoryStorage, readStore, storageName, type Stor
 import { chips } from '../src/plan.js';
 import { adoptAccount, queueForward, switchAccount } from '../src/store.js';
 import { NOTES_V1, notes, notesOf, puzzles, slotKey, solve, tagNote, writeNote } from './models.js';
+import { cutShort } from './storage.js';
 
 /** The list as the build before sync left it. */
 const V1 = JSON.stringify({ shopping: 'milk, eggs', call: 'the plumber', 'Bad Id': 'dropped' });
 const META = 'notes.v2.meta', ACKS = 'notes.v2.acks', FOLD = 'notes.v2.v1';
 const ROOM_A = '11111111-1111-4111-8111-111111111111', ROOM_B = '22222222-2222-4222-8222-222222222222';
 const env = (t = 1_790_400_000_000) => ({ now: () => t });
+const clockOf = (st: Storage) => (JSON.parse(st.get(META)!) as { clock: number }).clock;
 
 /** localStorage near its quota: a write past `room` more bytes is refused without a word, as browserStorage swallows it. */
 function nearFull(init: Record<string, string>, room: number): Storage & { data: Map<string, string> } {
@@ -99,11 +101,17 @@ describe('the local store in storage', () => {
   });
 
   it('writes only what an edit changed, and the meta last', () => {
-    const st = memoryStorage(), local = new Local(st, notes, env());
+    const st = cutShort(), local = new Local(st, notes, env());
     local.edit((s, now) => writeNote(writeNote(s, 'a', 'one', now), 'b', 'two', now));
-    const set = vi.spyOn(st, 'set');
+    st.writes = 2;
     local.edit((s, now) => tagNote(s, 'b', 'work', now));
-    expect(set.mock.calls.map(c => c[0])).toEqual(['notes.v2.note.b', META]);
+    // Two writes were enough: the record the edit changed, and the meta.
+    const clock = local.store.clock;
+    expect([notesOf(readStore(st, notes)!).b!.tags, clockOf(st)]).toEqual([['work'], clock]);
+    st.writes = 1;
+    local.edit((s, now) => tagNote(s, 'a', 'home', now));
+    // Cut short after one: the record landed, and the meta after it did not.
+    expect([notesOf(readStore(st, notes)!).a!.tags, clockOf(st)]).toEqual([['home'], clock]);
   });
 
   it('a record that leaves the store has its key removed', () => {

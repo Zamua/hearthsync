@@ -292,7 +292,7 @@ describe('offline and failures', () => {
     d.sync.stop();
   });
 
-  it('server errors back off from 2 s, doubling; repeated ones show Not saved until an upload works', async () => {
+  it('server errors back off from 2 s, doubling, each wait jittered down by up to half; repeated ones show Not saved until an upload works', async () => {
     const { host, clock } = fakeWorld(), d = await backedUp(host, clock);
     d.sync.start();
     await clock.advance(0, [d]);
@@ -300,16 +300,21 @@ describe('offline and failures', () => {
     host.failNext(503, 3);
     d.sync.soon();
     await clock.advance(0, [d]);
-    const tries = () => host.log.filter(l => l.endsWith(' 503')).length;
+    const tries = () => host.log.filter(l => l.endsWith(' 503')).length, start = clock.t, at = (ms: number) => clock.advance(start + ms - clock.t, [d]);
     expect(tries()).toBe(1);
-    await clock.advance(1499, [d]);
+    // Waits of 1-2 s, 2-4 s, then 4-8 s: each check sits at the earliest or the latest a try may land.
+    await at(999);
     expect(tries()).toBe(1);
-    await clock.advance(1, [d]);
+    await at(2000);
     expect(tries()).toBe(2);
-    await clock.advance(3000, [d]);
+    await at(2999);
+    expect(tries()).toBe(2);
+    await at(6000);
     expect(tries()).toBe(3);
     expect(d.sync.status).toMatchObject({ state: 'error', problem: 'failing', items: { 'note/a': 'failed' } });
-    await clock.advance(6000, [d]);
+    await at(6999);
+    expect(d.sync.status.state).toBe('error');
+    await at(14_000);
     expect(d.sync.status).toMatchObject({ state: 'saved', problem: null, items: { 'note/a': 'saved' } });
     d.sync.stop();
   });

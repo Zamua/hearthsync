@@ -277,10 +277,10 @@ segments.
 | Request | Answer |
 | --- | --- |
 | `POST /api/rooms` | `201` with `{ "id": "<uuidv4>" }`: a new, empty room; the server picks the id. `429` with `Retry-After` when rooms are made too fast; `507` when the app's storage is full |
-| `GET /api/rooms/<room>` | `200` with every key: `{ "<key>": <value>, ... }`; `404` for no such room |
+| `GET /api/rooms/<room>` | `200` with every key: `{ "<key>": <value>, ... }` (`{}` when empty); `404` for no such room |
 | `GET /api/rooms/<room>/<key>` | `200` with the value; `404` for no such key or room |
-| `PUT /api/rooms/<room>/<key>` | body: the value; `2xx`; `404` for no such room; `413` when the room is at its cap (keys or bytes); `507` when the app's storage is full |
-| `DELETE /api/rooms/<room>/<key>` | `2xx`, also for an absent key; `404` for no such room |
+| `PUT /api/rooms/<room>/<key>` | body: the value; `2xx` with no body; `404` for no such room; `413` when the room is at its cap (keys or bytes); `507` when the app's storage is full |
+| `DELETE /api/rooms/<room>/<key>` | `2xx` with no body, also for an absent key; `404` for no such room |
 
 A malformed room id or key is `400`. Every answer carries a `Date` header (used to correct the device's clock). A query
 string is ignored by the server: the library adds a unique one (`?fresh=...`) to read past an edge cache that may hold

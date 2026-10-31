@@ -31,6 +31,14 @@ describe('the rooms API over HTTP', () => {
     expect(await status(api.scan(room))).toEqual([0, null]);
   });
 
+  it('takes a 2xx from something in the way (a captive portal) for a bad answer: not an empty room, not a write', async () => {
+    const portal: typeof fetch = async () => new Response('<html>sign in to the wifi</html>', { status: 200 });
+    const api = httpRooms(ORIGIN, { fetch: portal }), room = 'f0000000-0000-4000-8000-00000000abcd';
+    expect(await status(api.scan(room))).toEqual([502, null]);
+    expect(await status(api.put(room, 'k', 1))).toEqual([502, null]);
+    expect(await status(api.delete(room, 'k'))).toEqual([502, null]);
+  });
+
   it('a fresh scan asks past an edge that keeps a 404, by a query the server ignores, unique to each read', async () => {
     const host = new FakeRooms(), urls: string[] = [];
     const api = httpRooms(ORIGIN, { fetch: (u, i) => { urls.push(String(u)); return host.fetch(u, i); } });

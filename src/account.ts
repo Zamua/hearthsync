@@ -8,6 +8,8 @@ import { MAX_MEMBERS, isObj, isPid, regFrom } from './repair.js';
 /** Room keys of the manifest, the shared rooms and the forward, never an app's. */
 export const ACCOUNT_KEY = 'account', SHARED_KEY = 'shared', FORWARD_KEY = 'forward';
 
+export const isLibraryKey = (key: string): boolean => key === ACCOUNT_KEY || key === SHARED_KEY || key === FORWARD_KEY;
+
 /** The format of the manifest and forwards, and the default of an app's docs. */
 export const DOC = 1;
 

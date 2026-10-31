@@ -1,4 +1,4 @@
-import { ACCOUNT_KEY, DOC, FORWARD_KEY, SHARED_KEY, isNewer } from './account.js';
+import { DOC, isLibraryKey, isNewer } from './account.js';
 import { canon, type Reg, type Stamp } from './crdt.js';
 import { samePlay, type Kind, type Model, type Snapshot } from './model.js';
 
@@ -7,7 +7,7 @@ import { samePlay, type Kind, type Model, type Snapshot } from './model.js';
 export type Records<R> = Readonly<Record<string, R>>;
 
 /** The kind of the record at a room key; null for keys that are not the app's. */
-export const kindOf = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => (key === ACCOUNT_KEY || key === SHARED_KEY || key === FORWARD_KEY ? null : m.kind(key));
+export const kindOf = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => (isLibraryKey(key) ? null : m.kind(key));
 
 /** The kind of a key records live at: the app's, and not one an earlier build wrote. */
 export const homeKind = <R>(m: Model<R, unknown>, key: string): Kind<R> | null => { const k = kindOf(m, key); return k && !k.home ? k : null; };
@@ -75,7 +75,7 @@ export function recordsIn<R>(m: Model<R, unknown>, snap: Snapshot): Records<R> {
 
 /** A shared room's snapshot as a layout reads it: without the library's keys and a newer build's docs. */
 export function roomRead<R>(m: Model<R, unknown>, snap: Snapshot): Snapshot {
-  return Object.fromEntries(Object.entries(snap).filter(([k, v]) => k !== FORWARD_KEY && k !== ACCOUNT_KEY && k !== SHARED_KEY && !isNewer(v, versionOf(m))));
+  return Object.fromEntries(Object.entries(snap).filter(([k, v]) => !isLibraryKey(k) && !isNewer(v, versionOf(m))));
 }
 
 /** The record at key as a shared room holds it, by its kind's layout or whole at its key; null when it holds none. */

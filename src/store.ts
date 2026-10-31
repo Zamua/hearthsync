@@ -223,6 +223,12 @@ export function followRoom<R, A>(m: Model<R, unknown>, s: LocalStore<R, A>, from
   return moveTo(m, s, Object.keys(at).filter(k => at[k]!.val === from), to, now);
 }
 
+/** Records of kinds never shared, which only an account room holds. */
+const holdsAccountRecords = <R>(m: Model<R, unknown>, snapshot: Snapshot): boolean => Object.keys(snapshot).some(k => kindOf(m, k) !== null && !ownsRoom(m, k));
+
+/** A room holding a manifest or any of the app's keys but shared records (a shared room holds only those). */
+export const isAccountRoom = <R>(m: Model<R, unknown>, snapshot: Snapshot): boolean => ACCOUNT_KEY in snapshot || holdsAccountRecords(m, snapshot);
+
 /**
  * The live shared record a room holds: its key (the smallest, should it hold several); null for none, and for an
  * account room, which holds a manifest or records of the account's own. A room laid out by a kind's layout is found
@@ -235,7 +241,7 @@ export function sharedKey<R>(m: Model<R, unknown>, snapshot: Snapshot, room?: st
     const k = homeKind(m, laid), r = k?.layout && k.room === 'own' ? roomRecord(m, snapshot, laid) : null;
     if (r !== null && isLive(m, laid, r)) return laid;
   }
-  if (Object.keys(snapshot).some(k => kindOf(m, k) !== null && !ownsRoom(m, k))) return null;
+  if (holdsAccountRecords(m, snapshot)) return null;
   const records = recordsIn(m, snapshot);
   return Object.keys(records).filter(k => ownsRoom(m, k) && !homeKind(m, k)!.layout && isLive(m, k, records[k]!)).sort()[0] ?? null;
 }

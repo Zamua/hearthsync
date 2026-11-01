@@ -11,6 +11,8 @@ Fixed:
 - After another tab moved the account to a new room, this tab timed the new room's 404s from the old room's first one,
   so a single 404 from it (an edge cache's) could show the account as `lost`, and a lost old room still read as lost
   until the new one answered. Each room's 404s are now timed on their own.
+- A shared room that had been at its cap kept the status at `full` after it was left (as did any room no longer
+  synced). Only rooms this device still syncs with count now.
 
 ## 0.4.1
 

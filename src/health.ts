@@ -102,8 +102,6 @@ export class RoomHealth {
     return acc !== null && this.of(acc).reach.kind === 'gone';
   }
 
-  get anyFull(): boolean { return [...this.rooms.values()].some(r => r.full); }
-
   /** A shared room gone for good; the account room, gone, is lost instead, and still synced for when it answers. */
   isGone(room: string): boolean { return room !== this.account() && this.of(room).reach.kind === 'gone'; }
 

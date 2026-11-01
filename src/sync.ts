@@ -538,7 +538,7 @@ export class Sync<R, A = undefined> {
     if (!drop) return false;
     this.local.edit(s => purgeRecord(this.m, s, drop), 'sync');
     await this.purgeKeys();
-    return !held.has(drop);
+    return !this.health.holds(room)?.has(drop);
   }
 
   /** Purged records' keys, deleted from the account room. */

@@ -8,6 +8,7 @@ import type { Snapshot } from './model.js';
 import { isLive, mergeRecords, ownsRoom, recordsIn, roomRecord, type Records } from './records.js';
 import { acknowledge, changed, chips, dirty, joinAccount, plan, roomsOf, takeIn, writtenOnce, type Put } from './plan.js';
 import { RoomHealth } from './health.js';
+import { FULL_EVERY, initial, next, type Loop, type LoopEffect, type LoopEvent, type Timer } from './loop.js';
 import { forwardsFrom, scanRoom, type Landing } from './reads.js';
 import { RoomError, isMissingRoom, type RoomApi } from './rooms.js';
 import { StatusTracker, type ItemChip, type SyncProblem, type SyncState, type SyncStatus } from './status.js';
@@ -21,18 +22,12 @@ import {
 // acknowledges what the server took, backs off when it cannot, and tells the UI how things stand. The app never waits
 // on it.
 
-/** A local change is saved this long after changes stop, and never later than MAX_WAIT after the first. */
-const DEBOUNCE = 15_000, MAX_WAIT = 60_000;
-/** Full scans: every 5 minutes while visible, and on returning after a minute away. */
-const FULL_EVERY = 5 * 60_000, AWAY = 60_000;
 /** A room with at most this many dirty keys, scanned fully under FULL_EVERY ago, reads just those keys. */
 const LIGHT_MAX = 4;
 /** Rounds over every room until one moves nothing; bounded, as two devices clobbering each other can keep it busy. */
 const MAX_LAPS = 4;
 /** Browsers cap the bodies of keepalive requests in flight (64 KiB). */
 const KEEPALIVE_BYTES = 60_000;
-/** A burst of changes to a fed room's copy is planned once, this long after the first. */
-const FEED_DELAY = 150;
 
 export interface SyncEvents {
   status: SyncStatus;
@@ -82,29 +77,19 @@ export class Sync<R, A = undefined> {
   private listeners = new Map<keyof SyncEvents, Set<Listener<never>>>();
   private queue: Promise<unknown> = Promise.resolve();
   private running = 0;
-  private started = false;
-  private passTimer: unknown = null;
-  private passAt = Infinity;
-  private wantFull = false;
-  private debounce: unknown = null;
-  private firstChange: number | null = null;
-  private periodic: unknown = null;
-  private netDown = false;
+  /** The loop's state: only send() changes it. */
+  private loop: Loop = initial;
+  private timers = new Map<Timer, unknown>();
   /** Account rooms that are the landing of a forward cycle: their own forward is ignored. */
   private cycleHeads = new Set<string>();
   private madeAccount = false;
   private newer = false;
   private savedAt: number | null = null;
-  private hiddenAt: number | null = null;
   /** The page-hide flush in flight, outside the pass queue. */
   private flushing: Promise<void> | null = null;
   private feeds = new Map<string, Feed>();
   /** Shares in flight by record key: a second share of a record waits on the first, so the record gets one room. */
   private sharing = new Map<string, Promise<string>>();
-  private feedTimers = new Map<string, unknown>();
-  private held = false;
-  /** An account round was passed over while held. */
-  private deferred = false;
   private readonly health: RoomHealth;
   private readonly backoff: Backoff;
   private readonly tracker: StatusTracker;
@@ -139,68 +124,37 @@ export class Sync<R, A = undefined> {
   // Triggers.
 
   /** Begins background sync: a full pass now, then the periodic one. */
-  start(): void {
-    if (this.started) return;
-    this.started = true;
-    this.schedule(0, true);
-    const every = () => { this.periodic = this.env.setTimer(() => { if (this.env.visible()) this.schedule(0, true); every(); }, FULL_EVERY); };
-    every();
-  }
+  start(): void { this.send({ type: 'start' }); }
 
-  stop(): void {
-    this.started = false;
-    for (const h of [this.passTimer, this.debounce, this.periodic, ...this.feedTimers.values()]) if (h !== null) this.env.clearTimer(h);
-    this.passTimer = this.debounce = this.periodic = null;
-    this.firstChange = null;
-    this.feedTimers.clear();
-  }
+  /** Ends background sync: every timer stops, and what they waited for is dropped. */
+  stop(): void { this.send({ type: 'stop' }); }
 
   /** A local change: saved once changes stop for a while. Stopped, the pass that starts the engine saves it. */
-  changed(): void {
-    if (!this.started) return;
-    const now = this.env.now();
-    this.firstChange ??= now;
-    const wait = Math.max(0, Math.min(DEBOUNCE, this.firstChange + MAX_WAIT - now));
-    if (this.debounce !== null) this.env.clearTimer(this.debounce);
-    this.debounce = this.env.setTimer(() => { this.debounce = null; this.firstChange = null; this.schedule(0); }, wait);
-  }
+  changed(): void { this.send({ type: 'changed' }); }
 
   /** Worth saving at once. */
-  soon(): void { this.schedule(0); }
+  soon(): void { this.send({ type: 'soon' }); }
 
-  /** The connection is back: sync now, past any backoff. */
+  /** The connection is back: sync now, past the backoff for the connection but not past a wait the server asked for. */
   online(): void {
-    this.netDown = false;
     this.backoff.reconnected();
-    this.schedule(0, true, true);
+    this.send({ type: 'online' });
     this.tracker.touch();
   }
 
   offline(): void { this.tracker.touch(); }
 
   /** The page is going to the background and may never run again: what is dirty goes now, unless stopped. */
-  hidden(): void {
-    this.hiddenAt ??= this.env.now();
-    if (!this.started) return;
-    this.flushing ??= this.flush().finally(() => { this.flushing = null; });
-  }
+  hidden(): void { this.send({ type: 'hidden' }); }
 
   /** Back in the foreground: a full scan after a minute away. */
-  visible(): void {
-    const away = this.hiddenAt === null ? 0 : this.env.now() - this.hiddenAt;
-    this.hiddenAt = null;
-    this.schedule(0, away >= AWAY);
-  }
+  visible(): void { this.send({ type: 'visible' }); }
 
   /**
    * While on, passes leave the account room for later (shared rooms still sync), so a realtime session is not slowed
    * by its uploads; turning it off runs what waited.
    */
-  hold(on: boolean): void {
-    if (on === this.held) return;
-    this.held = on;
-    if (!on && this.deferred) { this.deferred = false; this.schedule(0); }
-  }
+  hold(on: boolean): void { this.send({ type: 'hold', on }); }
 
   /** A live copy of a room, read in place of scans while it is ready. Returns the detach. */
   attach(room: string, feed: Feed): () => void {
@@ -209,21 +163,10 @@ export class Sync<R, A = undefined> {
   }
 
   /** The fed copy of a room changed (its first snapshot, or a write): it is planned against shortly, a burst once. */
-  fed(room: string): void {
-    if (!this.started || this.feedTimers.has(room)) return;
-    this.feedTimers.set(room, this.env.setTimer(() => { this.feedTimers.delete(room); void this.feedRound(room); }, FEED_DELAY));
-  }
+  fed(room: string): void { this.send({ type: 'fed', room }); }
 
   /** One pass now, after anything queued; resolves when it is done. */
-  sync(o: { full?: boolean } = {}): Promise<void> {
-    const full = this.wantFull || !!o.full;
-    this.wantFull = false;
-    return this.exclusive(() => this.pass(full)).then(done => {
-      // A full scan cut short is still owed: the retry scheduled for the failure makes it.
-      if (!done && full) this.wantFull = true;
-      this.passed();
-    });
-  }
+  sync(o: { full?: boolean } = {}): Promise<void> { return this.send({ type: 'sync', full: !!o.full }); }
 
   /** Resolves once nothing is queued or running. */
   async idle(): Promise<void> {
@@ -396,18 +339,50 @@ export class Sync<R, A = undefined> {
     });
   }
 
+  // The loop (loop.ts decides; this performs).
+
+  /** The only way the loop's state changes. Resolves once the pass it starts, if any, is done. */
+  private send(e: LoopEvent): Promise<void> {
+    const t = { now: this.env.now(), earliest: this.backoff.earliest(false), forced: this.backoff.earliest(true), visible: this.env.visible() };
+    const step = next(this.loop, e, t);
+    this.loop = step.state;
+    return Promise.all(step.effects.map(f => this.perform(f))).then(() => {});
+  }
+
+  private perform(f: LoopEffect): Promise<void> | undefined {
+    switch (f.do) {
+      case 'arm':
+        this.disarm(f.timer);
+        this.timers.set(f.timer, this.env.setTimer(() => { this.timers.delete(f.timer); this.send({ type: 'fired', timer: f.timer }); }, f.ms));
+        return;
+      case 'disarm':
+        this.disarm(f.timer);
+        return;
+      case 'pass':
+        return this.run(f.full);
+      case 'feed':
+        return this.feedRound(f.room);
+      case 'flush':
+        // One in flight covers this page-hide too.
+        this.flushing ??= this.flush().finally(() => { this.flushing = null; });
+        return;
+    }
+  }
+
+  private disarm(timer: Timer): void {
+    if (!this.timers.has(timer)) return;
+    this.env.clearTimer(this.timers.get(timer));
+    this.timers.delete(timer);
+  }
+
   // Passes and rounds.
 
-  private schedule(ms: number, full = false, force = false): void {
-    if (full) this.wantFull = true;
-    if (!this.started) return;
-    const now = this.env.now(), at = Math.max(now + ms, this.backoff.earliest(force));
-    if (this.passTimer !== null) {
-      if (this.passAt <= at) return;
-      this.env.clearTimer(this.passTimer);
-    }
-    this.passAt = at;
-    this.passTimer = this.env.setTimer(() => { this.passTimer = null; this.passAt = Infinity; void this.sync(); }, at - now);
+  /** A pass after anything queued; then the status settles, and the loop hears whether it got through. */
+  private run(full: boolean): Promise<void> {
+    return this.exclusive(() => this.pass(full)).then(done => {
+      this.send({ type: 'ran', full, done });
+      this.passed();
+    });
   }
 
   private exclusive<T>(fn: () => Promise<T>): Promise<T> {
@@ -431,7 +406,7 @@ export class Sync<R, A = undefined> {
       for (let lap = 0; lap < MAX_LAPS && !quiet; lap++) {
         quiet = true;
         const done = new Set<string>();
-        for (let room = this.next(done); room; room = this.next(done)) {
+        for (let room = this.nextRoom(done); room; room = this.nextRoom(done)) {
           done.add(room);
           if (await this.round(room, full && lap === 0)) quiet = false;
         }
@@ -439,7 +414,7 @@ export class Sync<R, A = undefined> {
       await this.purgeKeys();
       await this.writeForwards();
       this.backoff.clear();
-      this.netDown = false;
+      this.send({ type: 'reached' });
       if (!dirty(this.m, this.local.store).length) this.savedAt = this.env.now();
       return true;
     } catch (e) {
@@ -456,11 +431,11 @@ export class Sync<R, A = undefined> {
   }
 
   /** The account room first (unless held), then shared ones; none the server refuses, nor one gone. */
-  private next(done: ReadonlySet<string>): string | null {
+  private nextRoom(done: ReadonlySet<string>): string | null {
     const acc = this.local.store.account;
     return roomsOf(this.m, this.local.store).find(r => {
       if (done.has(r) || this.health.isOut(r)) return false;
-      if (r === acc && this.held) { this.deferred = true; return false; }
+      if (r === acc && this.loop.hold !== 'off') { this.send({ type: 'deferred' }); return false; }
       return true;
     }) ?? null;
   }
@@ -532,7 +507,7 @@ export class Sync<R, A = undefined> {
       if (!this.health.takes(put.room, put.key)) continue;
       if (!await this.putOne(put, keepalive)) continue;
       sent++;
-      this.netDown = false;
+      this.send({ type: 'reached' });
       this.health.wrote(put.room, put.key);
       this.local.edit(s => acknowledge(s, put.room, put.key, put.hash), 'sync');
     }
@@ -630,7 +605,7 @@ export class Sync<R, A = undefined> {
       if (await this.settle(room)) return true;
     } catch (e) {
       if (!(e instanceof RoomError)) throw e;
-      if (e.status === 0) this.netDown = true;
+      if (e.status === 0) this.send({ type: 'unreachable' });
     }
     this.soon();
     return false;
@@ -642,10 +617,10 @@ export class Sync<R, A = undefined> {
     // A newer build's store whose account this build cannot read: a room made here would split the account.
     if (this.local.newer) return;
     // An earlier pass may have taken the place of the retry's timer: keep the retry.
-    if (now < this.backoff.createAt) { this.schedule(this.backoff.createAt - now); return; }
+    if (now < this.backoff.createAt) { this.send({ type: 'retry', ms: this.backoff.createAt - now }); return; }
     let room: string;
     try { room = await this.api.create(); } catch (e) {
-      if (e instanceof RoomError && e.status === 429) { this.schedule(this.backoff.createRefused(e, now)); return; }
+      if (e instanceof RoomError && e.status === 429) { this.send({ type: 'retry', ms: this.backoff.createRefused(e, now) }); return; }
       throw e;
     }
     this.backoff.created();
@@ -660,8 +635,8 @@ export class Sync<R, A = undefined> {
 
   private failed(e: unknown): void {
     if (!(e instanceof RoomError)) console.warn('sync:', e);
-    else if (e.status === 0) this.netDown = true;
-    this.schedule(this.backoff.failed(e, this.env.now()));
+    else if (e.status === 0) this.send({ type: 'unreachable' });
+    this.send({ type: 'retry', ms: this.backoff.failed(e, this.env.now()) });
   }
 
   /**
@@ -685,7 +660,7 @@ export class Sync<R, A = undefined> {
   /** A round against a room's fed copy, when a pass could run; another device's changes it brings are owed to the account room. */
   private async feedRound(room: string): Promise<void> {
     await this.exclusive(async () => {
-      if (!this.started || !this.env.online() || this.backoff.blocked(this.env.now()) || this.health.isOut(room)) return;
+      if (this.loop.run.kind === 'stopped' || !this.env.online() || this.backoff.blocked(this.env.now()) || this.health.isOut(room)) return;
       if (!this.feeds.get(room)?.ready || room === this.local.store.account) return;
       const fed = this.fedRead(room), before = this.local.store.records;
       try { await (fed ? this.apply(room, fed.remote, fed.keys) : this.round(room, false)); } catch (e) { this.failed(e); }
@@ -712,7 +687,7 @@ export class Sync<R, A = undefined> {
     try { return await fn(); } catch (e) {
       if (!(e instanceof RoomError)) throw e;
       // No connection: say so, and let a pass find out when it is back.
-      if (e.status === 0) { this.netDown = true; this.tracker.touch(); this.soon(); }
+      if (e.status === 0) { this.send({ type: 'unreachable' }); this.tracker.touch(); this.soon(); }
       throw new SyncError(e.status === 0 ? 'offline' : e.status === 404 ? 'notfound' : e.status === 429 ? 'rate' : e.status === 413 || e.status === 507 ? 'full' : 'failed');
     }
   }
@@ -771,7 +746,7 @@ export class Sync<R, A = undefined> {
     const s = this.local.store, problem = this.problem(), c = chips(this.m, s, r => this.health.isOut(r));
     const failing = problem === 'failing' || problem === 'full' || problem === 'lost';
     const items = Object.fromEntries(Object.entries(c.items).map(([k, chip]): [string, ItemChip] => [k, failing && s.account && chip !== 'saved' ? 'failed' : chip]));
-    const online = this.env.online() && !this.netDown;
+    const online = this.env.online() && !this.loop.down;
     const state: SyncState = !online ? 'offline' : this.running ? 'syncing' : problem ? 'error' : c.unsaved || dirty(this.m, s).length ? 'syncing' : 'saved';
     return {
       state, problem,

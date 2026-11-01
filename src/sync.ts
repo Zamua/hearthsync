@@ -736,7 +736,8 @@ export class Sync<R, A = undefined> {
   private problem(): SyncProblem | null {
     const now = this.env.now();
     if (this.health.lost) return 'lost';
-    if (this.health.anyFull || this.backoff.paused(now)) return 'full';
+    // only rooms still synced: a full room left, gone or forwarded away says nothing about this device's saves
+    if (roomsOf(this.m, this.local.store).some(r => this.health.isFull(r)) || this.backoff.paused(now)) return 'full';
     if (this.backoff.failing && this.env.online()) return 'failing';
     if (!this.local.store.account && now < this.backoff.createAt) return 'rate';
     return null;

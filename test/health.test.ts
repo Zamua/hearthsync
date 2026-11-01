@@ -104,7 +104,7 @@ describe('RoomHealth', () => {
     h.scanned(SHARED, { a: 1 });
     h.refused(SHARED);
     h.refused('unscanned');
-    expect([h.takes(SHARED, 'a'), h.takes(SHARED, 'b'), h.takes('unscanned', 'a'), h.anyFull]).toEqual([true, false, false, true]);
+    expect([h.takes(SHARED, 'a'), h.takes(SHARED, 'b'), h.takes('unscanned', 'a'), h.isFull(SHARED)]).toEqual([true, false, false, true]);
   });
 
   it('a 400 leaves the room out of sync without its being gone', () => {

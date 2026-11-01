@@ -48,6 +48,19 @@ describe('leaving, across the devices of the account that left', () => {
     expect(roomsOf(boards, device(host, clock, boards, 'b2', b2.storage).local.store)).toEqual([account(b)]);
   });
 
+  it('a shared room at its cap stops saying full once it is left', async () => {
+    const { host, clock } = fakeWorld(), { b, room } = await trio(host, clock, corks, C1, d => cork(d, { title: 'trip' }));
+    // full even after giving up a tombstone and trying once more
+    host.failNext(413, 2, new RegExp(`^PUT /api/rooms/${room}/`));
+    cork(b, { pin: 'one too many' });
+    await b.sync.sync();
+    expect(b.sync.status.problem).toBe('full');
+    await b.sync.leave(C1);
+    await b.sync.sync({ full: true });
+    expect(roomsOf(corks, b.local.store)).toEqual([account(b)]);
+    expect(b.sync.status.problem).toBeNull();
+  });
+
   it('online, what the device owes the room is uploaded first; offline, it stays in the account alone', async () => {
     const { host, clock } = fakeWorld(), { b, room } = await trio(host, clock, boards, B1, d => board(d, { title: 'ours' }));
     board(b, { pin: 'before' });

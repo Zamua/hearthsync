@@ -11,10 +11,8 @@ export const LOST_GAP = 10 * 60_000;
  * holding, and whether it takes new ones.
  */
 export class RoomHealth {
-  private accountMissingAt: number | null = null;
-  private lostAccount = false;
-  /** Shared rooms answering 404, since when; gone once that spans LOST_GAP, as for the account room. */
-  private sharedMissingAt = new Map<string, number>();
+  /** Rooms answering 404, since when; gone once that spans LOST_GAP. */
+  private missingAt = new Map<string, number>();
   private gone = new Set<string>();
   /** Rooms at their cap (413): until the next full scan, only keys already there are updated. */
   private full = new Set<string>();
@@ -26,16 +24,20 @@ export class RoomHealth {
   constructor(private now: () => number, private account: () => string | null) {}
 
   /** The account room is gone for good. */
-  get lost(): boolean { return this.lostAccount; }
+  get lost(): boolean {
+    const acc = this.account();
+    return acc !== null && this.gone.has(acc);
+  }
 
   get anyFull(): boolean { return this.full.size > 0; }
 
-  isGone(room: string): boolean { return this.gone.has(room); }
+  /** A shared room gone for good; the account room, gone, is lost instead, and still synced for when it answers. */
+  isGone(room: string): boolean { return room !== this.account() && this.gone.has(room); }
 
   isFull(room: string): boolean { return this.full.has(room); }
 
   /** Left out of sync: refused as malformed, or gone. */
-  isOut(room: string): boolean { return this.dropped.has(room) || this.gone.has(room); }
+  isOut(room: string): boolean { return this.dropped.has(room) || this.isGone(room); }
 
   /** Whether a PUT of key to room can land now. */
   takes(room: string, key: string): boolean {
@@ -58,9 +60,8 @@ export class RoomHealth {
 
   /** The room answered: any 404 before was a fault on the way, not a lost room. */
   answered(room: string): void {
-    if (room !== this.account()) { this.sharedMissingAt.delete(room); this.gone.delete(room); return; }
-    this.accountMissingAt = null;
-    this.lostAccount = false;
+    this.missingAt.delete(room);
+    this.gone.delete(room);
   }
 
   /** The room took a PUT of key. */
@@ -83,14 +84,8 @@ export class RoomHealth {
   /** The room answered 404 (no such room) or 400 (malformed). */
   missing(room: string, status: number): void {
     if (status === 400) { this.dropped.add(room); console.warn(`sync: room ${room} refused as malformed; left out of sync`); return; }
-    const now = this.now();
-    if (room !== this.account()) {
-      const since = this.sharedMissingAt.get(room);
-      if (since === undefined) this.sharedMissingAt.set(room, now);
-      else if (now - since >= LOST_GAP) this.gone.add(room);
-      return;
-    }
-    if (this.accountMissingAt === null) this.accountMissingAt = now;
-    else if (now - this.accountMissingAt >= LOST_GAP) this.lostAccount = true;
+    const now = this.now(), since = this.missingAt.get(room);
+    if (since === undefined) this.missingAt.set(room, now);
+    else if (now - since >= LOST_GAP) this.gone.add(room);
   }
 }

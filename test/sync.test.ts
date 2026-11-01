@@ -466,6 +466,22 @@ describe('offline and failures', () => {
     expect(d.heard.account.at(-1)).toEqual({ code: made });
   });
 
+  it("another tab's switch of account times the new account room's 404s afresh, not from the old one's", async () => {
+    const { host, clock } = fakeWorld(), a = await backedUp(host, clock), storage = memoryStorage();
+    const tab = device(host, clock, notes, 'b', storage);
+    write(tab, 'b', 'mine');
+    await tab.sync.sync();
+    host.rooms.delete(account(tab));
+    await tab.sync.sync({ full: true });
+    await device(host, clock, notes, 'b', storage).sync.linkCode(code(a));
+    clock.t += LOST_GAP;
+    // The scan and the read past any cache.
+    host.failNext(404, 2, new RegExp(`^GET /api/rooms/${account(a)}$`));
+    await tab.sync.sync({ full: true });
+    expect(account(tab)).toBe(account(a));
+    expect(tab.sync.status.problem).toBeNull();
+  });
+
   it('an app killed mid-round loses nothing: the next start uploads the rest', async () => {
     const { host, clock } = fakeWorld(), d = await backedUp(host, clock);
     write(d, 'a', 'oat milk');

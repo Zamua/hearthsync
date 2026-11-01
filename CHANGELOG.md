@@ -6,6 +6,8 @@ Fixed:
 
 - `stop()` then `start()` kept when the first change still waiting to be saved was made, so after a restart the first
   change was uploaded at once instead of 15 s after changes stopped.
+- A stopped engine still sent what was dirty as the page went to the background (`hidden()`). Stopped, it sends nothing
+  in the background now; `start()` saves what waited.
 
 ## 0.4.1
 

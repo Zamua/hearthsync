@@ -169,7 +169,7 @@ export class Sync<R, A = undefined> {
   /** The connection is back: sync now, past any backoff. */
   online(): void {
     this.netDown = false;
-    this.backoff.clear();
+    this.backoff.reconnected();
     this.schedule(0, true, true);
     this.tracker.touch();
   }
@@ -215,7 +215,11 @@ export class Sync<R, A = undefined> {
   sync(o: { full?: boolean } = {}): Promise<void> {
     const full = this.wantFull || !!o.full;
     this.wantFull = false;
-    return this.exclusive(() => this.pass(full)).then(() => this.passed());
+    return this.exclusive(() => this.pass(full)).then(done => {
+      // A full scan cut short is still owed: the retry scheduled for the failure makes it.
+      if (!done && full) this.wantFull = true;
+      this.passed();
+    });
   }
 
   /** Resolves once nothing is queued or running. */
@@ -413,8 +417,9 @@ export class Sync<R, A = undefined> {
     return run;
   }
 
-  private async pass(full: boolean): Promise<void> {
-    if (this.backoff.paused(this.env.now()) || !this.env.online()) { this.tracker.touch(); return; }
+  /** Whether it got through. */
+  private async pass(full: boolean): Promise<boolean> {
+    if (this.backoff.paused(this.env.now()) || !this.env.online()) { this.tracker.touch(); return false; }
     this.madeAccount = false;
     try {
       this.local.edit((s, now) => expire(this.m, s, now), 'sync');
@@ -433,8 +438,10 @@ export class Sync<R, A = undefined> {
       this.backoff.clear();
       this.netDown = false;
       if (!dirty(this.m, this.local.store).length) this.savedAt = this.env.now();
+      return true;
     } catch (e) {
       this.failed(e);
+      return false;
     }
   }
 
@@ -701,7 +708,8 @@ export class Sync<R, A = undefined> {
     if (!this.env.online()) throw new SyncError('offline');
     try { return await fn(); } catch (e) {
       if (!(e instanceof RoomError)) throw e;
-      if (e.status === 0) this.netDown = true;
+      // No connection: say so, and let a pass find out when it is back.
+      if (e.status === 0) { this.netDown = true; this.tracker.touch(); this.soon(); }
       throw new SyncError(e.status === 0 ? 'offline' : e.status === 404 ? 'notfound' : e.status === 429 ? 'rate' : e.status === 413 || e.status === 507 ? 'full' : 'failed');
     }
   }

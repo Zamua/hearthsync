@@ -151,6 +151,7 @@ export class Sync<R, A = undefined> {
     this.started = false;
     for (const h of [this.passTimer, this.debounce, this.periodic, ...this.feedTimers.values()]) if (h !== null) this.env.clearTimer(h);
     this.passTimer = this.debounce = this.periodic = null;
+    this.firstChange = null;
     this.feedTimers.clear();
   }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+Fixed:
+
+- `stop()` then `start()` kept when the first change still waiting to be saved was made, so after a restart the first
+  change was uploaded at once instead of 15 s after changes stopped.
+
 ## 0.4.1
 
 Fixed:

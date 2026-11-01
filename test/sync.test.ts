@@ -538,6 +538,28 @@ describe('triggers', () => {
 });
 
 describe('restarts', () => {
+  it('stopping drops a save still waiting, and the first change after starting again waits the full 15 s', async () => {
+    const { host, clock } = fakeWorld(), d = await backedUp(host, clock);
+    d.sync.start();
+    await clock.advance(0, [d]);
+    const puts = () => host.requests('PUT').length, base = puts();
+    write(d, 'a', 'one');
+    await clock.advance(10_000, [d]);
+    d.sync.stop();
+    await clock.advance(2 * 60_000, [d]);
+    expect(puts()).toBe(base);
+    d.sync.start();
+    await clock.advance(0, [d]);
+    expect(textOn(host, account(d), 'a')).toBe('one');
+    const started = puts();
+    write(d, 'a', 'two');
+    await clock.advance(14_000, [d]);
+    expect(puts()).toBe(started);
+    await clock.advance(1000, [d]);
+    expect(textOn(host, account(d), 'a')).toBe('two');
+    d.sync.stop();
+  });
+
   it('a restarted app keeps its account and acks: nothing is sent twice', async () => {
     const { host, clock } = fakeWorld(), d = await backedUp(host, clock);
     const puts = host.requests('PUT').length, again = device(host, clock, notes, 'a', d.storage);

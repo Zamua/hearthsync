@@ -16,6 +16,8 @@ const retryAfter = (e: RoomError, fallback: number): number => Math.min(e.retryA
 export class Backoff {
   private failures = 0;
   private backoffUntil = 0;
+  /** A wait the server asked for (429 Retry-After): the connection coming back does not end it. */
+  private waitUntil = 0;
   private pausedUntil = 0;
   private createBlockedUntil = 0;
   /** 429s in a row from the account room's POST. */
@@ -31,14 +33,20 @@ export class Backoff {
   /** Every upload waits: the app's storage is full. */
   paused(now: number): boolean { return now < this.pausedUntil; }
 
-  /** Paused, or backing off. */
-  blocked(now: number): boolean { return now < this.pausedUntil || now < this.backoffUntil; }
+  /** Paused, backing off, or waiting as the server asked. */
+  blocked(now: number): boolean { return now < this.pausedUntil || now < this.backoffUntil || now < this.waitUntil; }
 
-  /** The earliest a pass may run: past a pause, and past any backoff unless forced. */
-  earliest(force: boolean): number { return Math.max(force ? 0 : this.backoffUntil, this.pausedUntil); }
+  /** The earliest a pass may run: past a pause and the server's wait, and past any backoff unless forced. */
+  earliest(force: boolean): number { return Math.max(force ? 0 : this.backoffUntil, this.waitUntil, this.pausedUntil); }
 
-  /** A pass went through, or the connection is back. */
+  /** A pass went through. */
   clear(): void {
+    this.reconnected();
+    this.waitUntil = 0;
+  }
+
+  /** The connection is back: backing off for it is over, a wait the server asked for is not. */
+  reconnected(): void {
     this.failures = 0;
     this.backoffUntil = 0;
   }
@@ -48,7 +56,7 @@ export class Backoff {
     if (e instanceof RoomError && e.status === 507) { this.pausedUntil = now + PAUSE_FULL; return PAUSE_FULL; }
     if (e instanceof RoomError && e.status === 429) {
       const ms = retryAfter(e, 60);
-      this.backoffUntil = now + ms;
+      this.waitUntil = now + ms;
       return ms;
     }
     this.failures++;

@@ -330,6 +330,64 @@ describe('offline and failures', () => {
     expect(d.sync.status).toMatchObject({ state: 'saved', items: { 'note/a': 'saved' } });
   });
 
+  it('a UI operation that finds no connection shows offline only until a pass gets through', async () => {
+    const { host, clock } = fakeWorld(), a = await backedUp(host, clock), b = await backedUp(host, clock, 'b');
+    b.sync.start();
+    await clock.advance(0, [b]);
+    b.down = true;
+    expect(await fail(b.sync.peekCode(code(a)))).toBe('offline');
+    expect(b.sync.status.state).toBe('offline');
+    b.down = false;
+    await clock.advance(10_000, [b]);
+    expect(b.sync.status.state).toBe('saved');
+    b.sync.stop();
+  });
+
+  it('a full scan asked for and cut short by a failure is still a full scan when retried', async () => {
+    const { host, clock } = fakeWorld(), a = await backedUp(host, clock), b = device(host, clock, notes, 'b');
+    await b.sync.linkCode(code(a));
+    a.sync.start();
+    await clock.advance(0, [a]);
+    a.sync.hidden();
+    await clock.advance(0, [a]);
+    write(b, 'b', 'from b');
+    await b.sync.sync();
+    await clock.advance(2 * 60_000, [a]);
+    host.failNext(0, 1, new RegExp(`^GET /api/rooms/${account(a)}`));
+    a.sync.visible();
+    await clock.advance(10_000, [a]);
+    expect(held(a).b?.text).toBe('from b');
+    a.sync.stop();
+  });
+
+  it("the connection coming back retries a dropped request at once, but still waits out a server's Retry-After", async () => {
+    const { host, clock } = fakeWorld(), d = await backedUp(host, clock);
+    d.sync.start();
+    await clock.advance(0, [d]);
+    const puts = () => host.requests('PUT').length;
+    write(d, 'a', 'oat milk');
+    host.failNext(0, 1, /^PUT /);
+    d.sync.soon();
+    await clock.advance(0, [d]);
+    const dropped = puts();
+    d.sync.online();
+    await clock.advance(0, [d]);
+    expect(puts()).toBe(dropped + 1);
+    write(d, 'a', 'soy milk');
+    host.retryAfter = 120;
+    host.failNext(429, 1, /^PUT /);
+    d.sync.soon();
+    await clock.advance(0, [d]);
+    const limited = puts();
+    d.sync.online();
+    await clock.advance(60_000, [d]);
+    expect(puts()).toBe(limited);
+    await clock.advance(60_000, [d]);
+    expect(puts()).toBe(limited + 1);
+    expect(d.sync.status.items['note/a']).toBe('saved');
+    d.sync.stop();
+  });
+
   it('a request that never answers fails as no connection, and a UI operation does not wait behind it', async () => {
     const { host, clock } = fakeWorld(), a = await backedUp(host, clock), b = await backedUp(host, clock, 'b');
     write(b, 'b', 'edited');

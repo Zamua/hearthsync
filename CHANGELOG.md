@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Fixed:
+
+- A UI operation that found no connection left the status saying offline, with nothing scheduled to find out when the
+  connection came back, until a local edit or the five-minute full pass. It now schedules a pass at once.
+- A full scan cut short by a failure, or skipped while offline or paused, was retried as a light pass that reads only
+  dirty keys, so other devices' changes waited for the next periodic scan. The retry is now the full scan.
+- The connection coming back (`online()`) ended a server's 429 `Retry-After` wait along with the backoff for the
+  connection. It now waits out what the server asked for.
+
 ## 0.4.0
 
 Added:

@@ -155,8 +155,9 @@ export class Sync<R, A = undefined> {
     this.feedTimers.clear();
   }
 
-  /** A local change: saved once changes stop for a while. */
+  /** A local change: saved once changes stop for a while. Stopped, the pass that starts the engine saves it. */
   changed(): void {
+    if (!this.started) return;
     const now = this.env.now();
     this.firstChange ??= now;
     const wait = Math.max(0, Math.min(DEBOUNCE, this.firstChange + MAX_WAIT - now));
@@ -177,9 +178,10 @@ export class Sync<R, A = undefined> {
 
   offline(): void { this.tracker.touch(); }
 
-  /** The page is going to the background and may never run again: what is dirty goes now. */
+  /** The page is going to the background and may never run again: what is dirty goes now, unless stopped. */
   hidden(): void {
     this.hiddenAt ??= this.env.now();
+    if (!this.started) return;
     this.flushing ??= this.flush().finally(() => { this.flushing = null; });
   }
 
@@ -208,7 +210,7 @@ export class Sync<R, A = undefined> {
 
   /** The fed copy of a room changed (its first snapshot, or a write): it is planned against shortly, a burst once. */
   fed(room: string): void {
-    if (this.feedTimers.has(room)) return;
+    if (!this.started || this.feedTimers.has(room)) return;
     this.feedTimers.set(room, this.env.setTimer(() => { this.feedTimers.delete(room); void this.feedRound(room); }, FEED_DELAY));
   }
 

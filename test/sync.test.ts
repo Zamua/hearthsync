@@ -525,6 +525,22 @@ describe('triggers', () => {
     d.sync.stop();
   });
 
+  it('a stopped engine sends nothing as the page goes to the background, and starting saves what waited', async () => {
+    const { host, clock } = fakeWorld(), d = await backedUp(host, clock);
+    d.sync.start();
+    await clock.advance(0, [d]);
+    d.sync.stop();
+    write(d, 'a', 'oat milk');
+    d.sync.hidden();
+    await clock.advance(60_000, [d]);
+    expect(d.keepalive).toEqual([]);
+    expect(textOn(host, account(d), 'a')).toBe('milk');
+    d.sync.start();
+    await clock.advance(0, [d]);
+    expect(textOn(host, account(d), 'a')).toBe('oat milk');
+    d.sync.stop();
+  });
+
   it('every pass runs under the tab lock', async () => {
     const { host, clock } = fakeWorld(), l = device(host, clock, notes, 'a').local;
     let locked = 0;

@@ -13,6 +13,8 @@ Fixed:
   until the new one answered. Each room's 404s are now timed on their own.
 - A shared room that had been at its cap kept the status at `full` after it was left (as did any room no longer
   synced). Only rooms this device still syncs with count now.
+- A pass that came due while another was failing ran as soon as that one ended, inside the backoff its failure had
+  just set. It now waits the backoff out.
 
 ## 0.4.1
 

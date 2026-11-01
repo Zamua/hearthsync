@@ -63,7 +63,7 @@ describe('starting and stopping', () => {
 
   it('stopped, a pass asked for still runs, paying the full scan the connection coming back owed', () => {
     const r = feed(initial, [{ type: 'online' }, at(T0)], [{ type: 'sync', full: false }, at(T0)], [{ type: 'sync', full: false }, at(T0)]);
-    expect(r.effects).toEqual([[], [{ do: 'pass', full: true }], [{ do: 'pass', full: false }]]);
+    expect(r.effects).toEqual([[], [{ do: 'pass', full: true, due: false }], [{ do: 'pass', full: false, due: false }]]);
   });
 });
 
@@ -81,9 +81,9 @@ describe('the debounce', () => {
 });
 
 describe('passes', () => {
-  it("a timer's pass pays the full scan owed, once", () => {
+  it("a timer's pass pays the full scan owed, once, and is marked due so it still keeps to the backoff", () => {
     const r = feed(initial, [{ type: 'start' }, at(T0)], [{ type: 'fired', timer: 'pass' }, at(T0)], [{ type: 'sync', full: false }, at(T0)]);
-    expect(r.effects.slice(1)).toEqual([[{ do: 'pass', full: true }], [{ do: 'pass', full: false }]]);
+    expect(r.effects.slice(1)).toEqual([[{ do: 'pass', full: true, due: true }], [{ do: 'pass', full: false, due: false }]]);
     expect(r.state.run).toMatchObject({ pass: null });
   });
 
@@ -174,5 +174,14 @@ describe('a timer the state does not expect', () => {
     const s = idle();
     for (const timer of ['pass', 'debounce', feedTimer('r')] as const) expect(next(s, { type: 'fired', timer }, at(T0)).state).toBe(s);
     for (const timer of ['pass', 'debounce', 'periodic', feedTimer('r')] as const) expect(next(initial, { type: 'fired', timer }, at(T0))).toEqual({ state: initial, effects: [] });
+  });
+});
+
+describe('the backoff', () => {
+  it('a pass asked for while another was failing waits out the backoff that failure set', () => {
+    // a change made while the pass runs arms the next pass at once; the pass then fails and backs off 2 s
+    const { state, effects } = feed(idle(), [{ type: 'soon' }, at(T0 + 10)], [{ type: 'retry', ms: 2000 }, at(T0 + 20, { earliest: T0 + 2020 })]);
+    expect(effects[1]).toEqual([arm('pass', 2000)]);
+    expect(state.run).toMatchObject({ pass: T0 + 2020 });
   });
 });

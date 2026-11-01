@@ -319,6 +319,30 @@ describe('offline and failures', () => {
     d.sync.stop();
   });
 
+  it('a pass that came due while another was failing waits out the backoff that failure set', async () => {
+    const { host, clock } = fakeWorld(), d = await backedUp(host, clock);
+    d.sync.start();
+    await clock.advance(0, [d]);
+    const puts = () => host.requests('PUT').length, before = puts(), settle = () => new Promise(r => setTimeout(r, 0));
+    host.failNext(503, 1, /^PUT /);
+    d.stall = /^PUT /;
+    write(d, 'a', 'oat milk');
+    d.sync.soon();
+    await clock.advance(0, []);
+    await settle();
+    // while that PUT hangs, another change: its pass comes due and queues behind
+    write(d, 'a', 'soy milk');
+    d.sync.soon();
+    await clock.advance(0, []);
+    d.release();
+    await d.sync.idle();
+    expect(puts()).toBe(before + 1);
+    await clock.advance(2000, [d]);
+    expect(puts()).toBe(before + 2);
+    expect(d.sync.status.items['note/a']).toBe('saved');
+    d.sync.stop();
+  });
+
   it('a network drop backs off too, and shows offline', async () => {
     const { host, clock } = fakeWorld(), d = await backedUp(host, clock);
     write(d, 'a', 'oat milk');

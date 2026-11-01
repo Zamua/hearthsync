@@ -82,8 +82,8 @@ export type LoopEffect =
   /** Sets the timer, in place of the one armed if any; it sends `fired` when it goes off. */
   | { do: 'arm'; timer: Timer; ms: number }
   | { do: 'disarm'; timer: Timer }
-  /** A pass, after anything queued. */
-  | { do: 'pass'; full: boolean }
+  /** A pass, after anything queued. `due`: its timer went off, so it still waits out a backoff set while it queued. */
+  | { do: 'pass'; full: boolean; due: boolean }
   /** A round against a fed room's copy. */
   | { do: 'feed'; room: string }
   /** What is dirty, sent as keepalive requests. */
@@ -135,7 +135,7 @@ export function next(s: Loop, e: LoopEvent, t: Moment): Step {
       if (run.kind === 'stopped' || run.feeds.has(e.room)) return to(s);
       return to({ ...s, run: { ...run, feeds: new Set(run.feeds).add(e.room) } }, { do: 'arm', timer: feedTimer(e.room), ms: FEED_DELAY });
     case 'sync':
-      return pass(s, e.full);
+      return pass(s, e.full, false);
     case 'ran':
       // A full scan cut short is still owed.
       return to(!e.done && e.full && !s.full ? { ...s, full: true } : s);
@@ -156,7 +156,7 @@ function fired(s: Loop, timer: Timer, t: Moment): Step {
   if (run.kind === 'stopped') return to(s);
   switch (timer) {
     case 'pass':
-      return run.pass === null ? to(s) : pass({ ...s, run: { ...run, pass: null } }, false);
+      return run.pass === null ? to(s) : pass({ ...s, run: { ...run, pass: null } }, false, true);
     case 'debounce':
       return run.debounce === null ? to(s) : want({ ...s, run: { ...run, debounce: null } }, t, 0);
     case 'periodic': {
@@ -175,18 +175,19 @@ function fired(s: Loop, timer: Timer, t: Moment): Step {
 
 /**
  * A pass ms from now, or as soon after as the backoff allows (waiving the backoff for the connection if `force`); a
- * pass due sooner stands. Stopped, only the full scan is owed.
+ * pass due sooner stands unless the backoff forbids it. Stopped, only the full scan is owed.
  */
 function want(s: Loop, t: Moment, ms: number, o: { full?: boolean; force?: boolean } = {}): Step {
   const owed = o.full && !s.full ? { ...s, full: true } : s, { run } = owed;
   if (run.kind === 'stopped') return to(owed);
-  const at = Math.max(t.now + ms, o.force ? t.forced : t.earliest);
-  if (run.pass !== null && run.pass <= at) return to(owed);
+  const floor = o.force ? t.forced : t.earliest, at = Math.max(t.now + ms, floor);
+  // a pass armed before a failure set the backoff would run inside it
+  if (run.pass !== null && run.pass <= at && run.pass >= floor) return to(owed);
   return to({ ...owed, run: { ...run, pass: at } }, { do: 'arm', timer: 'pass', ms: at - t.now });
 }
 
 /** A pass now, paying any full scan owed. */
-const pass = (s: Loop, full: boolean): Step => to(s.full ? { ...s, full: false } : s, { do: 'pass', full: full || s.full });
+const pass = (s: Loop, full: boolean, due: boolean): Step => to(s.full ? { ...s, full: false } : s, { do: 'pass', full: full || s.full, due });
 
 const armed = (run: Started): Timer[] => [
   ...(run.pass === null ? [] : ['pass' as const]),

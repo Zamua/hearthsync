@@ -359,7 +359,7 @@ export class Sync<R, A = undefined> {
         this.disarm(f.timer);
         return;
       case 'pass':
-        return this.run(f.full);
+        return this.run(f.full, f.due);
       case 'feed':
         return this.feedRound(f.room);
       case 'flush':
@@ -377,10 +377,14 @@ export class Sync<R, A = undefined> {
 
   // Passes and rounds.
 
-  /** A pass after anything queued; then the status settles, and the loop hears whether it got through. */
-  private run(full: boolean): Promise<void> {
-    return this.exclusive(() => this.pass(full)).then(done => {
-      this.send({ type: 'ran', full, done });
+  /**
+   * A pass after anything queued; then the status settles, and the loop hears whether it got through. A pass that came
+   * due while another failed does not run inside the backoff that failure set: it goes back to the loop to wait.
+   */
+  private run(full: boolean, due: boolean): Promise<void> {
+    return this.exclusive(async () => (due && this.env.now() < this.backoff.earliest(false) ? null : this.pass(full))).then(done => {
+      this.send({ type: 'ran', full, done: !!done });
+      if (done === null) void this.send({ type: 'retry', ms: 0 });
       this.passed();
     });
   }

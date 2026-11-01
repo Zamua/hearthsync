@@ -8,6 +8,9 @@ Fixed:
   change was uploaded at once instead of 15 s after changes stopped.
 - A stopped engine still sent what was dirty as the page went to the background (`hidden()`). Stopped, it sends nothing
   in the background now; `start()` saves what waited.
+- After another tab moved the account to a new room, this tab timed the new room's 404s from the old room's first one,
+  so a single 404 from it (an edge cache's) could show the account as `lost`, and a lost old room still read as lost
+  until the new one answered. Each room's 404s are now timed on their own.
 
 ## 0.4.1
 

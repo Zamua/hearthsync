@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.1
+
+Fixed:
+
+- A room the server no longer has was found gone only once its 404s spanned `LOST_GAP` within one run of the engine.
+  An app restarted inside that gap each time (a phone PWA, say) never got there, and its status said `syncing`
+  forever. Each room's first 404 is now kept in the meta (`missing`), so the gap spans restarts; any answer from the
+  room clears it.
+- Docs owed to a room that is gone or refused as malformed kept the status at `syncing`. Only rooms still synced
+  count now.
+
 ## 0.5.0
 
 Fixed:

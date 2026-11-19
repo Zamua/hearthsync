@@ -34,11 +34,16 @@ export interface LocalStore<R, A = undefined> {
    * keeping the register in the record (`Kind.register`) are not here.
    */
   shared: Regs<string>;
+  /**
+   * Each room answering 404, by when it first did with no answer since. Kept across restarts, so a room the server
+   * lost is found gone even on a device that never stays open for the whole gap.
+   */
+  missing: Readonly<Record<string, number>>;
 }
 
 /** A store with nothing in it yet; app is the app's starting state (its meta hook's read of `{}`). */
 export const emptyStore = <R, A = undefined>(app: A = undefined as A): LocalStore<R, A> =>
-  ({ account: null, profile: null, clock: 0, records: {}, acks: {}, forwards: {}, purge: {}, shared: {}, app });
+  ({ account: null, profile: null, clock: 0, records: {}, acks: {}, forwards: {}, purge: {}, shared: {}, missing: {}, app });
 
 /** The highest stamp of the shared rooms' registers. */
 export const sharedStamp = (shared: Regs<string>): Stamp => Math.max(0, ...Object.values(shared).map(r => r.t));
@@ -170,6 +175,13 @@ export function switchAccount<R, A>(s: LocalStore<R, A>, room: string, now: numb
 /** The account room `from` is owed a forward to this device's account, written once everything is uploaded there. */
 export const queueForward = <R, A>(s: LocalStore<R, A>, from: string): LocalStore<R, A> =>
   !s.account || from === s.account || s.forwards[from] === s.account ? s : { ...s, forwards: { ...s.forwards, [from]: s.account } };
+
+/** The room's 404 streak, from since (null: it answered), with streaks of rooms no longer synced (not in rooms) dropped. */
+export function roomMissing<R, A>(s: LocalStore<R, A>, room: string, since: number | null, rooms: readonly string[]): LocalStore<R, A> {
+  const missing = Object.fromEntries(Object.entries(s.missing).filter(([r]) => r !== room && rooms.includes(r)));
+  if (since !== null) missing[room] = since;
+  return { ...s, missing };
+}
 
 export function forwardDone<R, A>(s: LocalStore<R, A>, from: string): LocalStore<R, A> {
   if (!Object.hasOwn(s.forwards, from)) return s;

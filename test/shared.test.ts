@@ -6,6 +6,7 @@ import { acknowledge, dirty, plan, roomDocs, roomsOf, type Plan } from '../src/p
 import { adoptAccount, emptyStore, followRoom, joinRoom, shareRecord, type LocalStore } from '../src/store.js';
 import { LOST_GAP } from '../src/health.js';
 import type { SyncError } from '../src/sync.js';
+import { memoryStorage } from '../src/local.js';
 import { device, fakeWorld, type Device, type FakeRooms, type TestClock } from '../src/testing/index.js';
 import { boardKey, boards, boardsOf, deleteBoard, editBoard, listKey, type Board } from './models.js';
 
@@ -434,4 +435,44 @@ describe('random histories across two accounts sharing a board converge', () => 
       for (const [k, v] of Object.entries(snap(srv, RS))) expect(ds[2]!.s.acks[RS]![k]).toBe(hash(v));
     }
   }, 30000);
+});
+
+describe('a shared room the server lost, on a device restarted inside the gap each time', () => {
+  it('is found gone once its 404s span LOST_GAP across restarts, and saving no longer waits on it', async () => {
+    const { host, clock } = fakeWorld(), storage = memoryStorage();
+    const a = device(host, clock, boards, 'a', storage);
+    edit(a, B1, { title: 'first' });
+    await a.sync.sync();
+    const room = await a.sync.share(B1);
+    host.rooms.delete(room);
+    edit(a, B1, { title: 'changed' });
+    let d = a;
+    for (let i = 0; i < 3; i++) {
+      await d.sync.sync({ full: true });
+      expect(d.sync.status).toMatchObject({ gone: [], state: 'syncing' });
+      d.sync.stop();
+      clock.t += LOST_GAP / 2 - 1;
+      d = device(host, clock, boards, 'a', storage);
+    }
+    await d.sync.sync({ full: true });
+    expect(d.sync.status).toMatchObject({ gone: [B1], state: 'saved', problem: null });
+  });
+
+  it('an answer between restarts starts the streak over', async () => {
+    const { host, clock } = fakeWorld(), storage = memoryStorage();
+    const a = device(host, clock, boards, 'a', storage);
+    edit(a, B1, { title: 'first' });
+    await a.sync.sync();
+    const room = await a.sync.share(B1);
+    host.failNext(404, 2, new RegExp(`^GET /api/rooms/${room}$`));
+    await a.sync.sync({ full: true });
+    expect(a.local.store.missing).toHaveProperty(room);
+    await a.sync.sync({ full: true });
+    expect(a.local.store.missing).toEqual({});
+    clock.t += LOST_GAP;
+    const b = device(host, clock, boards, 'a', storage);
+    host.rooms.delete(room);
+    await b.sync.sync({ full: true });
+    expect(b.sync.status.gone).toEqual([]);
+  });
 });

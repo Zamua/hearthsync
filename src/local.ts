@@ -90,6 +90,7 @@ export function readStore<R, A>(st: Storage, m: Model<R, A>): LocalStore<R, A> |
     records, acks, shared,
     forwards: strings(meta.forwards, (k, v) => isRoomId(k) && isRoomId(v)),
     purge: Object.fromEntries(Object.entries(isObj(meta.purge) ? meta.purge : {}).filter((e): e is [string, number] => homeKind(m, e[0]) !== null && isStamp(e[1]))),
+    missing: Object.fromEntries(Object.entries(isObj(meta.missing) ? meta.missing : {}).filter((e): e is [string, number] => isRoomId(e[0]) && isStamp(e[1]))),
   };
 }
 
@@ -138,7 +139,7 @@ export class Persist<R, A> {
   /** Each key with the object it holds (unchanged objects are skipped by identity) and its doc. */
   private entries(s: LocalStore<R, A>): Entry[] {
     const app = this.m.meta ? this.m.meta.write(s.app) : {};
-    const p = this.m.prefix, meta = { ...app, v: metaV(this.m), account: s.account, profile: s.profile, clock: s.clock, forwards: s.forwards, purge: s.purge, shared: s.shared };
+    const p = this.m.prefix, meta = { ...app, v: metaV(this.m), account: s.account, profile: s.profile, clock: s.clock, forwards: s.forwards, purge: s.purge, shared: s.shared, missing: s.missing };
     return [
       ...Object.entries(s.records).map(([key, r]): Entry => [p + storageName(key), r, () => docOf(this.m, key, r)]),
       [p + ACKS, s.acks, () => s.acks],

@@ -90,11 +90,28 @@ function absurd(e: never): never {
 export class RoomHealth {
   private rooms = new Map<string, RoomState>();
 
-  constructor(private now: () => number, private account: () => string | null) {}
+  /**
+   * kept: each room's first 404 as the device kept it from before (a room seen first this session starts from it), and
+   * keep, told of each change to it: so a 404 streak spans restarts, an app closed inside LOST_GAP each time included.
+   */
+  constructor(
+    private now: () => number, private account: () => string | null,
+    private kept: () => Readonly<Record<string, number>> = () => ({}), private keep: (room: string, since: number | null) => void = () => {},
+  ) {}
 
-  private of(room: string): RoomState { return this.rooms.get(room) ?? unseen; }
+  private of(room: string): RoomState {
+    const known = this.rooms.get(room);
+    if (known) return known;
+    const since = this.kept()[room];
+    return since === undefined ? unseen : { ...unseen, reach: { kind: 'missing', since } };
+  }
 
-  private on(room: string, e: RoomEvent): void { this.rooms.set(room, next(this.of(room), e, this.now())); }
+  private on(room: string, e: RoomEvent): void {
+    const was = this.of(room), now = next(was, e, this.now());
+    this.rooms.set(room, now);
+    const since = (r: Reach) => (r.kind === 'missing' ? r.since : r.kind === 'gone' ? this.kept()[room] ?? null : null);
+    if (since(now.reach) !== (this.kept()[room] ?? null)) this.keep(room, since(now.reach));
+  }
 
   /** The account room is gone for good. */
   get lost(): boolean {

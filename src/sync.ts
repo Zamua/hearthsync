@@ -14,7 +14,7 @@ import { RoomError, isMissingRoom, type RoomApi } from './rooms.js';
 import { StatusTracker, type ItemChip, type SyncProblem, type SyncState, type SyncStatus } from './status.js';
 import {
   adoptAccount, expire, followRoom, forwardDone, isAccountRoom, joinRoom, leaveRoom, oldestTombstone, placed, placements, purgeDone, purgeRecord, queueForward,
-  roomOf, shareRecord, sharedKey, switchAccount, type LocalStore,
+  roomMissing, roomOf, shareRecord, sharedKey, switchAccount, type LocalStore,
 } from './store.js';
 
 // The sync engine: the device's store, its account room and the rooms of its shared records, reconciled in the
@@ -95,7 +95,8 @@ export class Sync<R, A = undefined> {
   private readonly tracker: StatusTracker;
 
   constructor(private local: Local<R, A>, private api: RoomApi, private env: SyncEnv, private lock: SyncLock = fn => fn()) {
-    this.health = new RoomHealth(() => env.now(), () => local.store.account);
+    this.health = new RoomHealth(() => env.now(), () => local.store.account, () => local.store.missing,
+      (room, since) => local.edit(s => roomMissing(s, room, since, roomsOf(this.m, s)), 'sync'));
     this.backoff = new Backoff(() => env.random());
     this.tracker = new StatusTracker(() => env.now(), () => this.compute(), () => this.running > 0, st => this.emit('status', st));
     local.on((_next, _prev, source) => {
@@ -752,7 +753,7 @@ export class Sync<R, A = undefined> {
     const failing = problem === 'failing' || problem === 'full' || problem === 'lost';
     const items = Object.fromEntries(Object.entries(c.items).map(([k, chip]): [string, ItemChip] => [k, failing && s.account && chip !== 'saved' ? 'failed' : chip]));
     const online = this.env.online() && !this.loop.down;
-    const state: SyncState = !online ? 'offline' : this.running ? 'syncing' : problem ? 'error' : c.unsaved || dirty(this.m, s).length ? 'syncing' : 'saved';
+    const state: SyncState = !online ? 'offline' : this.running ? 'syncing' : problem ? 'error' : c.unsaved || dirty(this.m, s).some(p => !this.health.isOut(p.room)) ? 'syncing' : 'saved';
     return {
       state, problem,
       code: s.account ? codeFromRoom(s.account) : null,
